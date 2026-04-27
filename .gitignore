@@ -1,0 +1,110 @@
+.trellis 
+# By default data is not tracked in git, but you can add it to the repository if you want to share it with others or keep it under version control. To do this, you can remove the .gitignore entry for the data directory and commit the changes to your repository.
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+*.pyd
+*.dll
+*.dylib
+
+# Distribution / packaging
+.Python
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+wheels/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+hypothesis/
+*.cover
+*.py,cover
+coverage.xml
+
+# Type checker / linter caches
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Django / Flask local stuff
+*.log
+local_settings.py
+instance/
+.webassets-cache
+
+# Documentation builds
+docs/_build/
+
+# mkdocs
+/site
+
+# Sphinx
+doc/_build/
+
+# Databases / local app data
+*.sqlite3
+*.db
+
+# Secrets / env files
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# OpenCode MCP config (contains API keys)
+opencode.json
+!.opencode.json.example
+
+# IDE / editor
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Misc
+*.tmp
+*.swp
+*.swo
+
+# Optional: dependency lockfiles (uncomment if not committing)
+#Pipfile.lock
+#poetry.lock
+#uv.lock

@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Trellis Graph Visualizer</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  :root {
+    --bg: #0b0c10;
+    --panel: #111318;
+    --surface: #16181f;
+    --text: #e6e8ef;
+    --muted: #8b92a8;
+    --accent: #00f2c3;
+    --accent2: #3b82f6;
+    --danger: #ef4444;
+    --warn: #f59e0b;
+    --border: rgba(255,255,255,0.08);
+    --glow: rgba(0, 242, 195, 0.25);
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    overflow: hidden;
+  }
+
+  #app { display: flex; width: 100vw; height: 100vh; }
+
+  /* Sidebar */
+  #sidebar {
+    width: 320px;
+    flex-shrink: 0;
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 16px;
+    gap: 12px;
+    overflow-y: auto;
+    z-index: 10;
+  }
+  #sidebar h2 { margin: 0 0 4px; font-size: 18px; letter-spacing: 0.5px; }
+  #sidebar p.lead { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
+  .divider { height: 1px; background: var(--border); margin: 6px 0; }
+
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field label { font-size: 11px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.8px; }
+  .field input, .field select {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    outline: none;
+  }
+  .row { display: flex; gap: 8px; }
+  .row .field { flex: 1; }
+
+  button {
+    background: linear-gradient(135deg, #00f2c3, #0ea5e9);
+    border: none;
+    color: #000;
+    font-weight: 700;
+    padding: 10px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 12px;
+    letter-spacing: 0.4px;
+  }
+  button.secondary {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  button:hover { filter: brightness(1.1); }
+  button:active { transform: translateY(1px); }
+
+  .stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+  .stat {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    text-align: center;
+  }
+  .stat .num { font-size: 18px; font-weight: 700; color: var(--accent); }
+  .stat .label { font-size: 10px; color: var(--muted); text-transform: uppercase; margin-top: 4px; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 6px; }
+  .legend-item {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 11px; color: var(--muted);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 4px 8px;
+    border-radius: 6px;
+  }
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+
+  /* Graph area */
+  #graph-wrap {
+    flex: 1;
+    position: relative;
+    background: radial-gradient(circle at center, #0f111a 0%, #0b0c10 100%);
+  }
+  #graph { width: 100%; height: 100%; }
+
+  /* Tooltip */
+  #tooltip {
+    position: absolute;
+    background: rgba(11, 12, 16, 0.95);
+    border: 1px solid var(--border);
+    padding: 12px 14px;
+    border-radius: 8px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    font-size: 12px;
+    line-height: 1.5;
+    max-width: 360px;
+    z-index: 20;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    backdrop-filter: blur(6px);
+  }
+  #tooltip strong { color: var(--accent); font-size: 13px; }
+  #tooltip .tag {
+    display: inline-block;
+    font-size: 10px;
+    text-transform: uppercase;
+    color: #000;
+    background: var(--accent);
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin-left: 8px;
+    font-weight: 700;
+  }
+
+  /* Overlay controls */
+  #controls {
+    position: absolute;
+    top: 12px; right: 12px;
+    display: flex; gap: 6px;
+    z-index: 5;
+  }
+  .pill {
+    background: rgba(17, 19, 24, 0.85);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 20px;
+    font-size: 11px;
+    cursor: pointer;
+    backdrop-filter: blur(6px);
+  }
+  .pill.active { border-color: var(--accent); color: var(--accent); }
+
+  /* Loader */
+  #loader {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(11, 12, 16, 0.7);
+    z-index: 30; opacity: 0; pointer-events: none;
+    transition: opacity 0.2s;
+  }
+  #loader.visible { opacity: 1; pointer-events: auto; }
+  .spinner {
+    width: 40px; height: 40px;
+    border: 3px solid rgba(255,255,255,0.08);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Node inspector panel inside sidebar */
+  #inspector {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    font-size: 12px;
+  }
+  #inspector .k { color: var(--muted); }
+  #inspector .v { color: var(--text); }
+  #inspector pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; font-size: 11px; color: var(--muted); }
+
+  svg text { font-family: inherit; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <h2>Trellis Graph</h2>
+    <p class="lead">Explore code topology. Click nodes to inspect. Drag to pan. Scroll to zoom. Toggle visibility with filters.</p>
+    <div class="divider"></div>
+    <div class="field">
+      <label>Project ID</label>
+      <input id="projectId" type="text" value="trellis" />
+    </div>
+    <div class="row">
+      <div class="field">
+        <label>Server Host</label>
+        <input id="host" type="text" value="http://localhost:17317" />
+      </div>
+    </div>
+    <div class="row">
+      <button id="btnLoad" onclick="loadGraph()">Load Graph</button>
+      <button id="btnImpact" class="secondary" onclick="toggleImpactMode()">Impact Mode</button>
+    </div>
+    <div class="divider"></div>
+    <div class="stats" id="stats">
+      <div class="stat"><div class="num" id="stFeat">0</div><div class="label">Features</div></div>
+      <div class="stat"><div class="num" id="stFunc">0</div><div class="label">Functions</div></div>
+      <div class="stat"><div class="num" id="stLinks">0</div><div class="label">Links</div></div>
+    </div>
+    <div class="divider"></div>
+    <div class="legend" id="legend"></div>
+    <div class="divider"></div>
+    <div id="inspector" style="display:none">
+      <div><span class="k">Node:</span> <span class="v" id="inName"></span></div>
+      <div><span class="k">Type:</span> <span class="v" id="inType"></span></div>
+      <div><span class="k">Feature:</span> <span class="v" id="inFeature"></span></div>
+      <pre id="inExtra"></pre>
+    </div>
+    <div class="divider"></div>
+    <div id="projectInfoPanel">
+      <label style="font-size:11px;text-transform:uppercase;color:var(--muted);letter-spacing:0.8px">Project Info</label>
+      <div id="projectInfoStatus" style="font-size:12px;color:var(--muted);margin:6px 0">Loading...</div>
+      <div id="projectInfoFeatures" style="margin-top:8px;font-size:11px;color:var(--muted)"></div>
+    </div>
+    <div class="divider"></div>
+    <div id="specPanel">
+      <label style="font-size:11px;text-transform:uppercase;color:var(--muted);letter-spacing:0.8px">Project Spec</label>
+      <div id="specStatus" style="font-size:12px;color:var(--muted);margin:6px 0">Loading...</div>
+      <div class="row">
+        <button id="btnEditSpec" class="secondary" onclick="openSpecEditor()">Edit Spec</button>
+      </div>
+      <div id="specPreview" style="margin-top:8px;font-size:11px;color:var(--muted);max-height:120px;overflow-y:auto"></div>
+    </div>
+  </aside>
+  <div id="graph-wrap">
+    <div id="controls">
+      <div class="pill" id="pillFeatures" onclick="toggleLayer('feature')">Features</div>
+      <div class="pill" id="pillFunctions" onclick="toggleLayer('function')">Functions</div>
+      <div class="pill" id="pillDeps" onclick="toggleLayer('feature_dep')">Feature Deps</div>
+      <div class="pill" id="pillCalls" onclick="toggleLayer('calls')">Call Graph</div>
+      <div class="pill" onclick="resetZoom()">Fit</div>
+    </div>
+    <svg id="graph"></svg>
+    <div id="tooltip"></div>
+    <div id="loader"><div class="spinner"></div></div>
+  </div>
+</div>
+
+<script>
+/* -------------------- State -------------------- */
+let allNodes = [];
+let allLinks = [];
+let projectFeatures = [];
+let projectId = 'trellis';
+let baseHost = 'http://localhost:17317';
+let activeLayers = new Set(['feature', 'function', 'feature_dep', 'belongs_to']);
+let impactMode = false;
+let selectedNodeId = null;
+
+let svg, gZoom, gLinks, gNodes, simulation;
+const width = () => document.getElementById('graph-wrap').clientWidth;
+const height = () => document.getElementById('graph-wrap').clientHeight;
+
+/* -------------------- Init -------------------- */
+function initGraph() {
+  const el = document.getElementById('graph');
+  el.setAttribute('width', width());
+  el.setAttribute('height', height());
+
+  svg = d3.select('#graph')
+    .attr('width', width())
+    .attr('height', height())
+    .attr('viewBox', [0, 0, width(), height()]);
+
+  // Glow filter
+  const defs = svg.append('defs');
+  const filter = defs.append('filter')
+    .attr('id', 'glow')
+    .attr('x', '-50%')
+    .attr('y', '-50%')
+    .attr('width', '200%')
+    .attr('height', '200%');
+  filter.append('feGaussianBlur')
+    .attr('stdDeviation', '2.5')
+    .attr('result', 'coloredBlur');
+  const feMerge = filter.append('feMerge');
+  feMerge.append('feMergeNode').attr('in', 'coloredBlur');
+  feMerge.append('feMergeNode').attr('in', 'SourceGraphic');
+
+  gZoom = svg.append('g');
+  gLinks = gZoom.append('g').attr('class', 'links');
+  gNodes = gZoom.append('g').attr('class', 'nodes');
+
+  const zoom = d3.zoom()
+    .scaleExtent([0.05, 8])
+    .on('zoom', (e) => gZoom.attr('transform', e.transform));
+  svg.call(zoom).on('dblclick.zoom', null);
+
+  window.addEventListener('resize', () => {
+    svg.attr('width', width()).attr('height', height()).attr('viewBox', [0, 0, width(), height()]);
+    if (simulation) {
+      simulation.force('center', d3.forceCenter(width() / 2, height() / 2));
+      simulation.alpha(0.3).restart();
+    }
+  });
+}
+
+/* -------------------- Data -------------------- */
+async function loadGraph() {
+  projectId = document.getElementById('projectId').value.trim() || 'trellis';
+  baseHost = document.getElementById('host').value.trim() || 'http://localhost:17317';
+  setLoading(true);
+  try {
+    const [graphResp, specResp] = await Promise.all([
+      fetch(`${baseHost}/graph/${encodeURIComponent(projectId)}`),
+      fetch(`${baseHost}/spec/${encodeURIComponent(projectId)}`),
+    ]);
+    
+    if (!graphResp.ok) throw new Error(await graphResp.text());
+    const data = await graphResp.json();
+    allNodes = data.nodes || [];
+    allLinks = data.links || [];
+    
+    // Update project info panel from graph data
+    const featureNodes = allNodes.filter(n => n.type === 'feature');
+    const funcNodes = allNodes.filter(n => n.type === 'function');
+    updateProjectInfoPanel({
+      status: 'ok',
+      features: featureNodes.map(n => n.id),
+      total_functions: funcNodes.length,
+      total_links: allLinks.length
+    });
+
+    // Load spec status
+    if (specResp.ok) {
+      const specData = await specResp.json();
+      updateSpecPanel(specData);
+    }
+
+    impactMode = false;
+    updateStats(data.stats);
+    buildLegend(data.nodes);
+    render();
+  } catch (e) {
+    alert('Failed to load graph: ' + e.message);
+  } finally {
+    setLoading(false);
+  }
+}
+
+async function loadImpactGraph() {
+  const fn = selectedNodeId && selectedNodeId.startsWith('func:')
+    ? selectedNodeId.replace('func:', '')
+    : prompt('Enter function path for impact analysis:');
+  if (!fn) return;
+  setLoading(true);
+  try {
+    const resp = await fetch(`${baseHost}/graph/${encodeURIComponent(projectId)}/impact/${encodeURIComponent(fn)}`);
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    allNodes = data.nodes || [];
+    allLinks = data.links || [];
+    impactMode = true;
+    updateStats(data.stats);
+    buildLegend(data.nodes);
+    render();
+  } catch (e) {
+    alert('Failed to load impact graph: ' + e.message);
+  } finally {
+    setLoading(false);
+  }
+}
+
+/* -------------------- Rendering -------------------- */
+function getVisibleData() {
+  const nodeSet = new Set();
+  const visibleNodes = allNodes.filter(n => {
+    if (n.type === 'feature' && activeLayers.has('feature')) { nodeSet.add(n.id); return true; }
+    if (n.type === 'function' && activeLayers.has('function')) { nodeSet.add(n.id); return true; }
+    return false;
+  });
+  const visibleLinks = allLinks.filter(l => {
+    const t = l.type;
+    if (t === 'feature_dep' && !activeLayers.has('feature_dep')) return false;
+    if (t === 'calls' && !activeLayers.has('calls')) return false;
+    if (t === 'belongs_to' && !activeLayers.has('belongs_to')) return false;
+    return nodeSet.has(l.source.id || l.source) && nodeSet.has(l.target.id || l.target);
+  });
+  return { nodes: visibleNodes, links: visibleLinks, nodeSet };
+}
+
+function render() {
+  if (simulation) { simulation.stop(); }
+  gLinks.selectAll('*').remove();
+  gNodes.selectAll('*').remove();
+
+  const { nodes, links } = getVisibleData();
+  if (!nodes.length) return;
+
+  // Build adjacency for highlight
+  const neighbor = new Map();
+  nodes.forEach(n => neighbor.set(n.id, new Set()));
+  links.forEach(l => {
+    const s = l.source.id || l.source;
+    const t = l.target.id || l.target;
+    neighbor.get(s).add(t);
+    neighbor.get(t).add(s);
+  });
+
+  // Simulation
+  simulation = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(links).id(d => d.id).distance(d => d.type === 'belongs_to' ? 35 : d.type === 'feature_dep' ? 120 : 80))
+    .force('charge', d3.forceManyBody().strength(d => d.type === 'feature' ? -600 : -250))
+    .force('center', d3.forceCenter(width() / 2, height() / 2))
+    .force('collide', d3.forceCollide().radius(d => d.type === 'feature' ? 28 : 14).iterations(2));
+
+  // Links
+  const linkSel = gLinks.selectAll('line')
+    .data(links)
+    .join('line')
+    .attr('stroke', d => {
+      if (d.type === 'feature_dep') return 'rgba(255,255,255,0.25)';
+      if (d.type === 'calls') return 'rgba(0,242,195,0.35)';
+      return 'rgba(255,255,255,0.08)';
+    })
+    .attr('stroke-width', d => d.type === 'feature_dep' ? 2 : d.type === 'calls' ? 1.5 : 0.5)
+    .attr('stroke-dasharray', d => d.type === 'belongs_to' ? '3,3' : null);
+
+  // Node groups
+  const nodeSel = gNodes.selectAll('g')
+    .data(nodes)
+    .join('g')
+    .call(d3.drag()
+      .on('start', (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on('end', (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; }))
+    .on('click', (e, d) => { e.stopPropagation(); selectNode(d, neighbor); })
+    .on('mouseover', (e, d) => showTooltip(e, d))
+    .on('mouseout', hideTooltip);
+
+  // Feature node: rounded rect
+  nodeSel.each(function(d) {
+    const g = d3.select(this);
+    if (d.type === 'feature') {
+      g.append('rect')
+        .attr('width', d.name.length * 7 + 28)
+        .attr('height', 28)
+        .attr('x', d => -(d.name.length * 7 + 28) / 2)
+        .attr('y', -14)
+        .attr('rx', 6)
+        .attr('ry', 6)
+        .attr('fill', d.color || '#555')
+        .attr('stroke', 'rgba(255,255,255,0.2)')
+        .attr('stroke-width', 1)
+        .attr('filter', 'url(#glow)');
+      g.append('text')
+        .attr('dy', '0.35em')
+        .attr('text-anchor', 'middle')
+        .attr('fill', '#fff')
+        .style('font-size', '11px')
+        .style('font-weight', '700')
+        .text(d.name);
+      g.append('circle')
+        .attr('cx', d => (d.name.length * 7 + 28) / 2 - 10)
+        .attr('cy', -14 + 14)
+        .attr('r', 9)
+        .attr('fill', 'rgba(255,255,255,0.12)')
+        .attr('stroke', 'rgba(255,255,255,0.25)')
+        .attr('stroke-width', 1);
+      g.append('text')
+        .attr('x', d => (d.name.length * 7 + 28) / 2 - 10)
+        .attr('y', -14 + 14)
+        .attr('dy', '0.35em')
+        .attr('text-anchor', 'middle')
+        .attr('fill', '#fff')
+        .style('font-size', '9px')
+        .text(d.function_count || 0);
+    } else {
+      // Function node: circle with accent ring
+      g.append('circle')
+        .attr('r', 8)
+        .attr('fill', d.feature_color || '#888')
+        .attr('stroke', 'rgba(255,255,255,0.2)')
+        .attr('stroke-width', 1)
+        .attr('filter', 'url(#glow)');
+      g.append('text')
+        .attr('dy', '0.35em')
+        .attr('text-anchor', 'middle')
+        .attr('fill', '#fff')
+        .style('font-size', '9px')
+        .style('opacity', 0.9)
+        .text(d.name.length > 18 ? d.name.slice(0, 16) + '..' : d.name)
+        .attr('y', 18);
+    }
+  });
+
+  simulation.on('tick', () => {
+    linkSel
+      .attr('x1', d => d.source.x)
+      .attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x)
+      .attr('y2', d => d.target.y);
+    nodeSel.attr('transform', d => `translate(${d.x},${d.y})`);
+  });
+}
+
+/* -------------------- Interactions -------------------- */
+function selectNode(d, neighbor) {
+  selectedNodeId = d.id;
+  const ne = neighbor.get(d.id);
+  gNodes.selectAll('g').style('opacity', n => (n.id === d.id || ne.has(n.id)) ? 1 : 0.15);
+  gLinks.selectAll('line').style('opacity', l => {
+    const s = l.source.id || l.source;
+    const t = l.target.id || l.target;
+    return (s === d.id || t === d.id) ? 1 : 0.05;
+  });
+
+  const ins = document.getElementById('inspector');
+  ins.style.display = 'block';
+  document.getElementById('inName').textContent = d.full_name || d.name;
+  document.getElementById('inType').textContent = d.type;
+  document.getElementById('inFeature').textContent = d.feature || d.name;
+  let extra = [];
+  if (d.type === 'feature') {
+    extra.push(`Functions: ${d.function_count}`);
+    extra.push(`Dependencies: ${(d.dependencies || []).join(', ') || 'none'}`);
+  } else {
+    extra.push(`File: ${d.file_path || 'unknown'}`);
+    extra.push(`Line: ${d.line || '-'}`);
+    if (d.docstring) extra.push(`Description: ${d.docstring}`);
+  }
+  document.getElementById('inExtra').textContent = extra.join('\n');
+}
+
+svg && svg.on && svg.on('click', () => {
+  selectedNodeId = null;
+  gNodes.selectAll('g').style('opacity', 1);
+  gLinks.selectAll('line').style('opacity', 1);
+  document.getElementById('inspector').style.display = 'none';
+});
+
+function showTooltip(e, d) {
+  const t = document.getElementById('tooltip');
+  let html = `<strong>${d.name}</strong><span class="tag">${d.type}</span><br/>`;
+  if (d.type === 'function') {
+    html += `<span style="color:var(--muted)">${d.full_name || ''}</span><br/>`;
+    html += `Feature: ${d.feature || 'unknown'}<br/>`;
+    html += `File: ${d.file_path || 'unknown'}:${d.line || '-'}`;
+  } else {
+    html += `${d.function_count || 0} functions`;
+  }
+  t.innerHTML = html;
+  t.style.opacity = 1;
+  moveTooltip(e);
+}
+
+function moveTooltip(e) {
+  const t = document.getElementById('tooltip');
+  const rect = document.getElementById('graph-wrap').getBoundingClientRect();
+  let x = e.clientX - rect.left + 14;
+  let y = e.clientY - rect.top + 14;
+  if (x + 280 > rect.width) x -= 300;
+  if (y + 120 > rect.height) y -= 140;
+  t.style.left = x + 'px';
+  t.style.top = y + 'px';
+}
+
+function hideTooltip() {
+  document.getElementById('tooltip').style.opacity = 0;
+}
+
+/* -------------------- Controls -------------------- */
+function toggleLayer(type) {
+  if (activeLayers.has(type)) activeLayers.delete(type); else activeLayers.add(type);
+  updatePills();
+  render();
+}
+
+function toggleImpactMode() {
+  const btn = document.getElementById('btnImpact');
+  if (!impactMode) {
+    loadImpactGraph();
+    btn.textContent = 'Back to Full';
+    btn.style.borderColor = 'var(--accent)';
+  } else {
+    loadGraph();
+    btn.textContent = 'Impact Mode';
+    btn.style.borderColor = '';
+  }
+}
+
+function resetZoom() {
+  svg.transition().duration(500).call(
+    d3.zoom().transform,
+    d3.zoomIdentity
+  );
+  if (simulation) simulation.alpha(0.3).restart();
+}
+
+function setLoading(v) {
+  document.getElementById('loader').classList.toggle('visible', v);
+}
+
+function updateStats(s) {
+  document.getElementById('stFeat').textContent = s.total_features ?? 0;
+  document.getElementById('stFunc').textContent = s.total_functions ?? 0;
+  document.getElementById('stLinks').textContent = s.total_links ?? 0;
+}
+
+function buildLegend(nodes) {
+  const colors = new Map();
+  nodes.forEach(n => {
+    if (n.type === 'feature') colors.set(n.name, n.color);
+  });
+  const el = document.getElementById('legend');
+  el.innerHTML = '';
+  colors.forEach((color, name) => {
+    const item = document.createElement('div');
+    item.className = 'legend-item';
+    item.innerHTML = `<div class="dot" style="background:${color}"></div>${name}`;
+    el.appendChild(item);
+  });
+}
+
+function updatePills() {
+  const map = {
+    'feature': 'pillFeatures',
+    'function': 'pillFunctions',
+    'feature_dep': 'pillDeps',
+    'calls': 'pillCalls',
+  };
+  for (const [k, id] of Object.entries(map)) {
+    document.getElementById(id).classList.toggle('active', activeLayers.has(k));
+  }
+}
+
+/* -------------------- Project Info Panel -------------------- */
+function updateProjectInfoPanel(data) {
+  const statusEl = document.getElementById('projectInfoStatus');
+  const featEl = document.getElementById('projectInfoFeatures');
+
+  if (data.status === 'ok') {
+    statusEl.textContent = `${data.features.length} features, ${data.total_functions || 0} functions`;
+    statusEl.style.color = 'var(--accent)';
+    featEl.innerHTML = data.features.slice(0, 8).map(f => `<div style="margin:2px 0">• ${f}</div>`).join('');
+    if (data.features.length > 8) featEl.innerHTML += `<div>+ ${data.features.length - 8} more</div>`;
+  } else {
+    statusEl.textContent = 'No project data. Sync a repository first.';
+    statusEl.style.color = 'var(--muted)';
+    featEl.innerHTML = '';
+  }
+}
+
+/* -------------------- Spec Panel -------------------- */
+let currentSpecContent = '';
+
+async function loadSpec() {
+  try {
+    const resp = await fetch(`${baseHost}/spec/${encodeURIComponent(projectId)}`);
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    updateSpecPanel(data);
+    return data;
+  } catch (e) {
+    console.error('Failed to load spec:', e);
+    document.getElementById('specStatus').textContent = 'Error loading spec';
+    document.getElementById('specStatus').style.color = 'var(--danger)';
+  }
+}
+
+function updateSpecPanel(data) {
+  const statusEl = document.getElementById('specStatus');
+  const previewEl = document.getElementById('specPreview');
+  
+  if (data.status === 'ok') {
+    statusEl.textContent = 'Spec: Found';
+    statusEl.style.color = 'var(--accent)';
+    currentSpecContent = data.content;
+    // Show a preview of the overview
+    const overview = data.overview || data.content.substring(0, 200) + '...';
+    previewEl.innerHTML = overview.replace(/\n/g, '<br>');
+  } else {
+    statusEl.textContent = 'Spec: Not found';
+    statusEl.style.color = 'var(--warn)';
+    currentSpecContent = data.content || '';
+    previewEl.innerHTML = `<div style="font-style:italic">No project.md found. Click Edit Spec to create one.</div>
+      <div style="margin-top:4px;color:var(--accent)">${data.hint || ''}</div>`;
+  }
+}
+
+function openSpecEditor() {
+  const modal = document.getElementById('specModal');
+  const editor = document.getElementById('specEditor');
+  editor.value = currentSpecContent || '';
+  modal.style.display = 'flex';
+}
+
+function closeSpecEditor() {
+  document.getElementById('specModal').style.display = 'none';
+}
+
+async function saveSpec() {
+  const content = document.getElementById('specEditor').value.trim();
+  if (!content) {
+    alert('Spec content cannot be empty');
+    return;
+  }
+  
+  setLoading(true);
+  try {
+    const resp = await fetch(`${baseHost}/spec/${encodeURIComponent(projectId)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    alert(data.message);
+    closeSpecEditor();
+    await loadSpec();
+  } catch (e) {
+    alert('Failed to save spec: ' + e.message);
+  } finally {
+    setLoading(false);
+  }
+}
+
+/* -------------------- Boot -------------------- */
+document.addEventListener('DOMContentLoaded', () => {
+  const params = new URLSearchParams(location.search);
+  const p = params.get('project_id');
+  if (p) document.getElementById('projectId').value = p;
+  initGraph();
+  updatePills();
+  loadGraph();
+});
+</script>
+
+<!-- Spec Editor Modal -->
+<div id="specModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:1000;justify-content:center;align-items:center">
+  <div style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:90%;max-width:800px;height:90%;display:flex;flex-direction:column;padding:20px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <h3 style="margin:0;font-size:16px">Edit Project Spec</h3>
+      <button onclick="closeSpecEditor()" style="background:var(--surface);border:1px solid var(--border);color:var(--text);padding:4px 12px;border-radius:6px;cursor:pointer">&times;</button>
+    </div>
+    <textarea id="specEditor" style="flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:12px;border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:13px;resize:none;outline:none;line-height:1.5"></textarea>
+    <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">
+      <button class="secondary" onclick="closeSpecEditor()">Cancel</button>
+      <button onclick="saveSpec()">Save Spec</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
