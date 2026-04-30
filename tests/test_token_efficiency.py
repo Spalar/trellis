@@ -113,7 +113,7 @@ class TestContextSizeEfficiency:
 
         report = trellis_engine.analyze_feature_impact(
             project_id=synced_project,
-            feature_name="auth",
+            feature_name="Auth",
             change_summary="Add logging",
             include_suggestions=True,
         )

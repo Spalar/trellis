@@ -104,7 +104,7 @@ class GraphVisualizer:
         }
 
     def export_impact_subgraph(
-        self, project_id: str, function_path: str
+        self, project_id: str, function_path: str, impact_report: dict = None
     ) -> Dict[str, Any]:
         """Export only the portion of the graph reachable from callers of a function."""
         graph = self.export_graph(project_id)
@@ -143,6 +143,18 @@ class GraphVisualizer:
             for link in graph["links"]
             if link["source"] in all_reachable and link["target"] in all_reachable
         ]
+
+        # Enrich nodes with risk levels from impact report
+        if impact_report:
+            risk_map = {}
+            for group in impact_report.get("risk_groups", []):
+                for func_path in group.get("functions", []):
+                    risk_map[f"func:{func_path}"] = group["risk"]
+
+            for node in filtered_nodes:
+                if node["id"] in risk_map:
+                    node["risk_level"] = risk_map[node["id"]]
+
         return {
             "project_id": project_id,
             "root_function": function_path,

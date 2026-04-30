@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -79,7 +80,9 @@ class ProjectSpec:
 class SpecManager:
     """Manages project.md specs for all projects."""
 
-    def __init__(self, base_dir: str = ".trellis/data") -> None:
+    def __init__(self, base_dir: str = None) -> None:
+        if base_dir is None:
+            base_dir = os.environ.get("TRELLIS_DATA_DIR", ".trellis/data")
         self.base_dir = Path(base_dir)
 
     def _safe_name(self, name: str) -> str:

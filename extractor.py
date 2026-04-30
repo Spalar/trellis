@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from ast_cache import ASTCache
 from models import ExtractedFunction
 
 
@@ -11,6 +12,36 @@ class ExtractionResult:
     def __init__(self) -> None:
         self.functions: List[ExtractedFunction] = []
         self.file_contents: Dict[str, str] = {}  # file_path -> source content
+
+
+def _parse_file_worker(repo_path: str, file_path_str: str) -> Tuple[List[dict], str]:
+    """Worker function for parallel parsing (must be picklable).
+    
+    Returns serialized ExtractedFunction dicts to avoid pickling tree-sitter objects.
+    """
+    from pathlib import Path
+    
+    file_path = Path(file_path_str)
+    repo = Path(repo_path)
+    
+    # Create a fresh extractor in each process
+    extractor = UnifiedExtractor()
+    file_funcs, content = extractor.extract_file_with_content(repo, file_path)
+    
+    # Serialize to plain dicts for pickling
+    serialized = []
+    for func in file_funcs:
+        serialized.append({
+            "function_path": func.function_path,
+            "file_path": func.file_path,
+            "start_line": func.start_line,
+            "end_line": func.end_line,
+            "docstring": func.docstring,
+            "source": func.source,
+            "raw_calls": func.raw_calls,
+        })
+    
+    return serialized, content
 
 try:
     import tree_sitter_javascript as tsjs
@@ -34,20 +65,155 @@ class UnifiedExtractor:
             "javascript": Parser(Language(tsjs.language())),
             "typescript": Parser(Language(tstypescript.language_typescript())),
         }
+        self.ast_cache = ASTCache()
 
     # ------------------------------------------------------------------
     # Public entry points
     # ------------------------------------------------------------------
-    def extract_repo(self, repo_path: str) -> ExtractionResult:
+    def extract_repo(self, repo_path: str, changed_files_only: bool = False, 
+                     file_hashes: Dict[str, tuple] = None) -> ExtractionResult:
+        """Extract functions from a repository.
+        
+        Uses AST cache for incremental syncs to skip re-parsing unchanged files.
+        
+        Args:
+            repo_path: Path to the repository
+            changed_files_only: If True, only extract files that have changed
+            file_hashes: Dict of file_path -> (hash, mtime) for change detection
+        """
         repo = Path(repo_path)
         result = ExtractionResult()
+        
+        # Always compute git hashes for consistent cache keys between full and incremental syncs
+        git_hashes = self._compute_file_hashes_git(repo_path)
+        use_git = bool(git_hashes)
+        
+        parsed_count = 0
+        skipped_count = 0
+        
         for file_path in self._iter_source_files(repo):
+            rel_path = file_path.relative_to(repo).as_posix()
+            
+            # Compute file hash for cache key (prefer git hash for consistency)
+            if use_git and rel_path in git_hashes:
+                file_hash = git_hashes[rel_path]
+            else:
+                file_hash = self._compute_file_hash(file_path)
+            
+            # Check if file changed (for incremental sync)
+            if changed_files_only and file_hashes is not None:
+                stored = file_hashes.get(rel_path)
+                if stored and stored[0] == file_hash:
+                    # File unchanged - skip entirely. Caller loads from DB.
+                    skipped_count += 1
+                    continue
+            
+            # Parse file
             file_funcs, content = self.extract_file_with_content(repo, file_path)
             result.functions.extend(file_funcs)
             if content:
-                rel_path = str(file_path.relative_to(repo))
                 result.file_contents[rel_path] = content
+            
+            parsed_count += 1
+            
+            if changed_files_only and file_hashes is not None:
+                file_hashes[rel_path] = (file_hash, 0)
+        
+        if changed_files_only:
+            print(f"[Trellis] Incremental sync: {parsed_count} files parsed, {skipped_count} files skipped")
+        
         return result
+    
+    def extract_repo_parallel(self, repo_path: str, max_workers: int = None) -> ExtractionResult:
+        """Extract functions using parallel parsing for faster full syncs.
+        
+        Uses ProcessPoolExecutor for true parallelism (bypasses GIL).
+        
+        Args:
+            repo_path: Path to the repository
+            max_workers: Number of parallel processes (default: CPU count)
+        """
+        import os
+        from concurrent.futures import ProcessPoolExecutor
+        from multiprocessing import get_context
+        
+        if max_workers is None:
+            max_workers = min(os.cpu_count() or 2, 8)  # Cap at 8 to avoid overwhelming the system
+        
+        repo = Path(repo_path)
+        result = ExtractionResult()
+        
+        # Collect all files first
+        files = list(self._iter_source_files(repo))
+        total_files = len(files)
+        print(f"[Trellis] Parsing {total_files} files with {max_workers} workers...")
+        
+        # Use spawn context to avoid issues with thread locks
+        ctx = get_context("spawn")
+        
+        # Parse files in parallel using processes
+        # Each process gets a fresh parser instance, avoiding GIL contention
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
+            futures = {
+                executor.submit(_parse_file_worker, repo_path, str(file_path)): file_path
+                for file_path in files
+            }
+            
+            completed = 0
+            for future in futures:
+                file_path = futures[future]
+                rel_path = str(file_path.relative_to(repo))
+                try:
+                    serialized_funcs, content = future.result(timeout=30)  # 30s timeout per file
+                    # Reconstruct ExtractedFunction objects
+                    for func_dict in serialized_funcs:
+                        result.functions.append(ExtractedFunction(**func_dict))
+                    if content:
+                        result.file_contents[rel_path] = content
+                except Exception as e:
+                    print(f"[Trellis] Warning: Failed to parse {rel_path}: {e}")
+                    continue
+                
+                completed += 1
+                if completed % 10 == 0 or completed == total_files:
+                    print(f"[Trellis] Progress: {completed}/{total_files} files ({len(result.functions)} functions)")
+        
+        print(f"[Trellis] Extraction complete: {len(result.functions)} functions from {total_files} files")
+        return result
+    
+    def _compute_file_hashes_git(self, repo_path: str) -> Dict[str, str]:
+        """Compute hashes for all tracked files using git hash-object.
+        
+        This is 10x faster than reading and hashing files individually
+        because git uses its internal object database.
+        """
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["git", "-C", repo_path, "ls-files", "--stage"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                return {}
+            
+            hashes = {}
+            for line in result.stdout.strip().split("\n"):
+                # Format: <mode> <hash> <stage>\t<file_path>
+                parts = line.split("\t", 1)
+                if len(parts) == 2:
+                    meta, file_path = parts
+                    hash_value = meta.split()[1]
+                    hashes[file_path] = hash_value
+            return hashes
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return {}
+    
+    def _compute_file_hash(self, file_path: Path) -> str:
+        """Compute MD5 hash of file contents. Fallback when git is not available."""
+        import hashlib
+        return hashlib.md5(file_path.read_bytes()).hexdigest()
 
     def extract_file_with_content(self, repo_root: Path, file_path: Path) -> Tuple[List[ExtractedFunction], str]:
         """Extract functions and return source content to avoid re-reading."""
@@ -81,7 +247,7 @@ class UnifiedExtractor:
         return ""
 
     def _iter_source_files(self, repo: Path) -> Iterable[Path]:
-        excludes = {".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", "dist", "build", ".next", ".nuxt"}
+        excludes = {".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache", "dist", "build", ".next", ".nuxt", ".trellis", ".dart_tool", "ephemeral"}
         exts = {"*.py", "*.js", "*.jsx", "*.mjs", "*.cjs", "*.ts", "*.tsx", "*.mts", "*.cts"}
         for pattern in exts:
             for path in repo.rglob(pattern):

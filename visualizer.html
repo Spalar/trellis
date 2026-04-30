@@ -214,6 +214,10 @@
       <button id="btnLoad" onclick="loadGraph()">Load Graph</button>
       <button id="btnImpact" class="secondary" onclick="toggleImpactMode()">Impact Mode</button>
     </div>
+    <div class="row">
+      <button id="btnHotspots" class="secondary" onclick="toggleHotspotMode()">Hotspots</button>
+      <button id="btnImpactDetails" class="secondary" onclick="loadImpactDetails()">Impact Details</button>
+    </div>
     <div class="divider"></div>
     <div class="stats" id="stats">
       <div class="stat"><div class="num" id="stFeat">0</div><div class="label">Features</div></div>
@@ -243,6 +247,14 @@
         <button id="btnEditSpec" class="secondary" onclick="openSpecEditor()">Edit Spec</button>
       </div>
       <div id="specPreview" style="margin-top:8px;font-size:11px;color:var(--muted);max-height:120px;overflow-y:auto"></div>
+    </div>
+    <div class="divider"></div>
+    <div id="impactDetailsPanel" style="display:none">
+      <label style="font-size:11px;text-transform:uppercase;color:var(--muted);letter-spacing:0.8px">Impact Analysis</label>
+      <div id="impactStatus" style="font-size:12px;color:var(--muted);margin:6px 0">Select a function and click Impact Details</div>
+      <div id="impactRisk" style="font-size:11px;margin:4px 0"></div>
+      <div id="impactBreakpoints" style="margin-top:8px;font-size:11px;color:var(--muted);max-height:100px;overflow-y:auto"></div>
+      <div id="impactTests" style="margin-top:8px;font-size:11px;color:var(--muted);max-height:100px;overflow-y:auto"></div>
     </div>
   </aside>
   <div id="graph-wrap">
@@ -384,6 +396,101 @@ async function loadImpactGraph() {
   }
 }
 
+async function loadImpactDetails() {
+  const fn = selectedNodeId && selectedNodeId.startsWith('func:')
+    ? selectedNodeId.replace('func:', '')
+    : prompt('Enter function path for impact analysis:');
+  if (!fn) return;
+  setLoading(true);
+  try {
+    const resp = await fetch(`${baseHost}/graph/${encodeURIComponent(projectId)}/impact-details/${encodeURIComponent(fn)}`);
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    updateImpactDetailsPanel(data);
+    // Also load the visual graph
+    await loadImpactGraph();
+  } catch (e) {
+    alert('Failed to load impact details: ' + e.message);
+  } finally {
+    setLoading(false);
+  }
+}
+
+function updateImpactDetailsPanel(data) {
+  const panel = document.getElementById('impactDetailsPanel');
+  const statusEl = document.getElementById('impactStatus');
+  const riskEl = document.getElementById('impactRisk');
+  const breakpointsEl = document.getElementById('impactBreakpoints');
+  const testsEl = document.getElementById('impactTests');
+  
+  panel.style.display = 'block';
+  statusEl.textContent = `Analyzing: ${data.root_function}`;
+  statusEl.style.color = 'var(--accent)';
+  
+  // Risk level with color
+  const riskColors = { high: 'var(--danger)', medium: 'var(--warn)', low: 'var(--accent)' };
+  riskEl.innerHTML = `<span style="color:${riskColors[data.risk_level] || 'var(--muted)'}">Risk: ${data.risk_level.toUpperCase()}</span>
+    <span style="color:var(--muted)"> | Confidence: ${Math.round((data.confidence || 0) * 100)}%</span>`;
+  
+  // Breakpoints
+  if (data.breakpoints && data.breakpoints.length > 0) {
+    breakpointsEl.innerHTML = '<strong>Breakpoints:</strong><br>' +
+      data.breakpoints.map(b => `• ${b.kind}: ${b.function_path} (${Math.round(b.confidence * 100)}%)`).join('<br>');
+  } else {
+    breakpointsEl.innerHTML = '';
+  }
+  
+  // Test suggestions
+  if (data.test_suggestions && data.test_suggestions.length > 0) {
+    const withTests = data.test_suggestions.filter(t => t.test_path);
+    const withoutTests = data.test_suggestions.filter(t => !t.test_path);
+    testsEl.innerHTML = '<strong>Tests:</strong><br>' +
+      (withTests.length > 0 ? withTests.slice(0, 5).map(t => `✓ ${t.function_path}`).join('<br>') + '<br>' : '') +
+      (withoutTests.length > 0 ? `<span style="color:var(--warn)">Missing: ${withoutTests.length} functions need tests</span>` : '');
+  } else {
+    testsEl.innerHTML = '';
+  }
+}
+
+let hotspotMode = false;
+
+async function toggleHotspotMode() {
+  const btn = document.getElementById('btnHotspots');
+  if (!hotspotMode) {
+    setLoading(true);
+    try {
+      const resp = await fetch(`${baseHost}/graph/${encodeURIComponent(projectId)}/hotspots`);
+      if (!resp.ok) throw new Error(await resp.text());
+      const data = await resp.json();
+      
+      // Highlight hotspot nodes
+      const hotspotPaths = new Set(data.hotspots.map(h => h.function_path));
+      allNodes.forEach(n => {
+        if (n.type === 'function' && hotspotPaths.has(n.id.replace('func:', ''))) {
+          n.isHotspot = true;
+          const hotspot = data.hotspots.find(h => h.function_path === n.id.replace('func:', ''));
+          n.hotspotScore = hotspot ? hotspot.centrality_score : 0;
+        }
+      });
+      
+      hotspotMode = true;
+      btn.textContent = 'Clear Hotspots';
+      btn.style.background = 'var(--danger)';
+      render();
+    } catch (e) {
+      alert('Failed to load hotspots: ' + e.message);
+    } finally {
+      setLoading(false);
+    }
+  } else {
+    allNodes.forEach(n => { n.isHotspot = false; n.hotspotScore = 0; });
+    hotspotMode = false;
+    btn.textContent = 'Hotspots';
+    btn.style.background = '';
+    render();
+  }
+}
+
 /* -------------------- Rendering -------------------- */
 function getVisibleData() {
   const nodeSet = new Set();
@@ -490,11 +597,21 @@ function render() {
         .text(d.function_count || 0);
     } else {
       // Function node: circle with accent ring
+      // Risk colors in impact mode, hotspot colors in hotspot mode
+      let nodeColor = d.feature_color || '#888';
+      if (d.isHotspot) {
+        const intensity = Math.min(1, d.hotspotScore || 0.5);
+        nodeColor = d3.interpolateRgb('#888', '#ef4444')(intensity);
+      } else if (d.risk_level) {
+        const riskColors = { high: '#ef4444', medium: '#f59e0b', low: '#00f2c3' };
+        nodeColor = riskColors[d.risk_level] || nodeColor;
+      }
+      
       g.append('circle')
-        .attr('r', 8)
-        .attr('fill', d.feature_color || '#888')
-        .attr('stroke', 'rgba(255,255,255,0.2)')
-        .attr('stroke-width', 1)
+        .attr('r', d.isHotspot ? 10 + (d.hotspotScore || 0) * 6 : 8)
+        .attr('fill', nodeColor)
+        .attr('stroke', d.isHotspot ? '#ef4444' : 'rgba(255,255,255,0.2)')
+        .attr('stroke-width', d.isHotspot ? 2 : 1)
         .attr('filter', 'url(#glow)');
       g.append('text')
         .attr('dy', '0.35em')

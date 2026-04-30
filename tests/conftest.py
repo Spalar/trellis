@@ -20,19 +20,27 @@ os.environ["TRELLIS_ALLOW_NO_AUTH"] = "true"
 def temp_data_dir():
     """Provide a temporary directory for test data."""
     with tempfile.TemporaryDirectory() as tmp:
-        old_dir = os.environ.get("TRELLIS_DATA_DIR", "")
+        old_data_dir = os.environ.get("TRELLIS_DATA_DIR", "")
+        old_db_path = os.environ.get("TRELLIS_DB_PATH", "")
         os.environ["TRELLIS_DATA_DIR"] = tmp
+        os.environ["TRELLIS_DB_PATH"] = str(Path(tmp) / "test.db")
         yield tmp
-        if old_dir:
-            os.environ["TRELLIS_DATA_DIR"] = old_dir
+        if old_data_dir:
+            os.environ["TRELLIS_DATA_DIR"] = old_data_dir
         else:
             os.environ.pop("TRELLIS_DATA_DIR", None)
+        if old_db_path:
+            os.environ["TRELLIS_DB_PATH"] = old_db_path
+        else:
+            os.environ.pop("TRELLIS_DB_PATH", None)
 
 
 @pytest.fixture
 def graph_store(temp_data_dir):
     """Provide a GraphStore backed by a temp directory."""
-    return GraphStore()
+    store = GraphStore()
+    yield store
+    store.close()
 
 
 @pytest.fixture

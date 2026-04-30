@@ -138,10 +138,10 @@ class TestImpactAccuracy:
         """Impact on reports should not include unrelated features."""
         report = trellis_engine.analyze_feature_impact(
             project_id=synced_project,
-            feature_name="reports",
+            feature_name="Reports",
             change_summary="Update report styling",
             include_suggestions=True,
         )
         # Should not falsely claim auth/payment are impacted
-        assert "auth" not in report.impacted_features
-        assert "payment" not in report.impacted_features
+        assert "Auth" not in report.impacted_features
+        assert "Payment" not in report.impacted_features

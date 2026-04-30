@@ -4,15 +4,20 @@ from collections import defaultdict, deque
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-from extractor import PythonTreeSitterExtractor
+from extractor import ExtractionResult, PythonTreeSitterExtractor
 from feature_intent import FeatureIntentExtractor
+from impact_analyzer import ImpactAnalyzer
 from models import (
+    BoundaryMap,
+    DiffImpactReport,
+    ExtractedFunction,
     FeatureContext,
     FeatureList,
     FeatureRecord,
     FunctionDetail,
     FunctionRecord,
     GraphIndex,
+    HotspotReport,
     ImpactReport,
     PathTrace,
     SearchHit,
@@ -28,6 +33,7 @@ class TrellisEngine:
         self.store = store
         self.extractor = extractor or PythonTreeSitterExtractor()
         self.intent_extractor = FeatureIntentExtractor()
+        self.impact_analyzer = ImpactAnalyzer(store=store)
 
     def sync_project(
         self,
@@ -39,11 +45,113 @@ class TrellisEngine:
         if not incremental:
             self.store.clear_project(project_id)
 
-        extraction_result = self.extractor.extract_repo(repo_path)
-        functions_by_path = self._build_function_graph(extraction_result)
-        features = self._build_feature_map(functions_by_path, extraction_result.file_contents)
-
-        self._persist_project(project_id, functions_by_path, features)
+        # Choose extraction strategy based on sync mode
+        if incremental:
+            # Incremental: compare current hashes with stored hashes, parse only changed files
+            print(f"[Trellis] Starting incremental sync of {repo_path}...")
+            
+            # Compute current hashes for all files
+            current_hashes = self.extractor._compute_file_hashes_git(repo_path)
+            if not current_hashes:
+                # Fallback: compute MD5 hashes
+                current_hashes = {}
+                for file_path in self.extractor._iter_source_files(Path(repo_path)):
+                    rel_path = str(file_path.relative_to(repo_path))
+                    current_hashes[rel_path] = self.extractor._compute_file_hash(file_path)
+            
+            # Load stored hashes from DB
+            stored_hashes = self.store.get_all_file_hashes(project_id)
+            
+            # Build file_hashes dict with stored hashes for extractor to compare
+            file_hashes = {}
+            for rel_path, current_hash in current_hashes.items():
+                stored = stored_hashes.get(rel_path)
+                file_hashes[rel_path] = (stored, 0) if stored else (None, 0)
+            
+            # Extract only changed files
+            extraction_result = self.extractor.extract_repo(
+                repo_path,
+                changed_files_only=True,
+                file_hashes=file_hashes
+            )
+            
+            # Identify changed files
+            changed_files = {
+                rel_path for rel_path, (stored, _) in file_hashes.items()
+                if stored is None or stored != current_hashes.get(rel_path)
+            }
+            
+            # Update stored hashes in DB
+            for rel_path, current_hash in current_hashes.items():
+                self.store.set_file_hash(project_id, rel_path, current_hash, 0)
+            
+            # Clean up deleted files
+            current_files = set(current_hashes.keys())
+            self.store.delete_file_hashes_not_in(project_id, current_files)
+            
+            # Load existing functions and merge
+            existing_functions = self.store.list_functions(project_id)
+            existing_by_path = {fn.function_path: fn for fn in existing_functions}
+            
+            # Remove functions from changed files
+            for fn in list(existing_by_path.values()):
+                # Normalize file path for comparison
+                file_path = fn.file_path
+                # Try to match relative path
+                rel_file_path = None
+                if repo_path in file_path:
+                    rel_file_path = Path(file_path).relative_to(repo_path).as_posix()
+                else:
+                    rel_file_path = file_path.replace("\\", "/")
+                
+                if rel_file_path in changed_files:
+                    del existing_by_path[fn.function_path]
+            
+            # Build merged extraction result: existing functions + new functions
+            merged = ExtractionResult()
+            
+            # Convert existing (unchanged) functions back to ExtractedFunction
+            for fn in existing_by_path.values():
+                merged.functions.append(ExtractedFunction(
+                    function_path=fn.function_path,
+                    file_path=fn.file_path,
+                    start_line=fn.start_line,
+                    end_line=fn.end_line,
+                    docstring=fn.docstring,
+                    source=fn.source,
+                    raw_calls=fn.callees,  # Use resolved callees as raw calls for re-resolution
+                ))
+            
+            # Add newly extracted functions
+            merged.functions.extend(extraction_result.functions)
+            merged.file_contents = extraction_result.file_contents
+            
+            # Build graph from merged set
+            functions_by_path = self._build_function_graph(merged)
+            features = self._build_feature_map(functions_by_path, merged.file_contents)
+            
+            # Persist
+            self._persist_project_batch(project_id, functions_by_path, features)
+        else:
+            # Full sync: use sequential parsing (parallel has overhead on Windows)
+            print(f"[Trellis] Starting full sync of {repo_path}...")
+            extraction_result = self.extractor.extract_repo(repo_path)
+            functions_by_path = self._build_function_graph(extraction_result)
+            features = self._build_feature_map(functions_by_path, extraction_result.file_contents)
+            
+            # Store file hashes for future incremental syncs
+            current_hashes = self.extractor._compute_file_hashes_git(repo_path)
+            if not current_hashes:
+                current_hashes = {}
+                for file_path in self.extractor._iter_source_files(Path(repo_path)):
+                    rel_path = str(file_path.relative_to(repo_path))
+                    current_hashes[rel_path] = self.extractor._compute_file_hash(file_path)
+            
+            for rel_path, file_hash in current_hashes.items():
+                self.store.set_file_hash(project_id, rel_path, file_hash, 0)
+            
+            self._persist_project_batch(project_id, functions_by_path, features)
+        
         index = self.store.load_index(project_id)
         assert index is not None
 
@@ -60,12 +168,20 @@ class TrellisEngine:
         """Build the function call graph from extracted code."""
         extracted = extraction_result.functions
         all_paths = {item.function_path for item in extracted}
+        
+        # Precompute suffix map once for all call resolution (major speedup)
+        suffix_map = self._build_suffix_map(all_paths)
+        
         file_intents = self._extract_file_intents_from_cache(extraction_result.file_contents)
         file_to_feature = self._map_files_to_features(file_intents)
 
         functions_by_path: Dict[str, FunctionRecord] = {}
-        for item in extracted:
-            resolved = self._resolve_calls(item.raw_calls, all_paths)
+        total = len(extracted)
+        for i, item in enumerate(extracted):
+            if i % 2000 == 0 and total > 2000:
+                print(f"[Trellis] Building graph: {i}/{total} functions...")
+            
+            resolved = self._resolve_calls_fast(item.raw_calls, all_paths, suffix_map)
             feature_name = file_to_feature.get(item.file_path) or self._feature_from_path(item.function_path)
 
             fn = FunctionRecord(
@@ -82,6 +198,7 @@ class TrellisEngine:
             functions_by_path[fn.function_path] = fn
 
         # Wire up callers
+        print(f"[Trellis] Wiring up {len(functions_by_path)} function callers...")
         for fn in functions_by_path.values():
             for callee in fn.callees:
                 target = functions_by_path.get(callee)
@@ -91,7 +208,25 @@ class TrellisEngine:
         for fn in functions_by_path.values():
             fn.callers.sort()
 
+        print(f"[Trellis] Graph complete: {len(functions_by_path)} functions")
         return functions_by_path
+    
+    def _build_suffix_map(self, all_paths: set) -> Dict[str, str]:
+        """Precompute suffix-to-fullpath map for fast call resolution."""
+        return {path.split(".")[-1]: path for path in all_paths}
+    
+    def _resolve_calls_fast(self, raw_calls: List[str], all_paths: set, suffix_map: Dict[str, str]) -> set:
+        """Resolve raw call strings to known function paths using precomputed suffix map."""
+        resolved: set = set()
+        for call in raw_calls:
+            if call in all_paths:
+                resolved.add(call)
+                continue
+            leaf = call.split(".")[-1]
+            target = suffix_map.get(leaf)
+            if target:
+                resolved.add(target)
+        return resolved
 
     def _build_feature_map(
         self,
@@ -139,7 +274,21 @@ class TrellisEngine:
         functions_by_path: Dict[str, FunctionRecord],
         features: Dict[str, FeatureRecord],
     ) -> None:
-        """Save graph to store and create index."""
+        """Save graph to store, remove stale data, and create index."""
+        # Remove functions that no longer exist
+        existing_functions = self.store.list_functions(project_id)
+        current_paths = set(functions_by_path.keys())
+        for fn in existing_functions:
+            if fn.function_path not in current_paths:
+                self.store.delete_function(project_id, fn.function_path)
+
+        # Remove features that no longer exist
+        existing_features = self.store.list_features(project_id)
+        current_features = set(features.keys())
+        for feat in existing_features:
+            if feat.feature_name not in current_features:
+                self.store.delete_feature(project_id, feat.feature_name)
+
         for feature in features.values():
             self.store.save_feature(project_id, feature)
         for fn in functions_by_path.values():
@@ -165,6 +314,43 @@ class TrellisEngine:
                 "functions": [fn.model_dump() for fn in functions_by_path.values()],
             },
         )
+
+    def _persist_project_batch(
+        self,
+        project_id: str,
+        functions_by_path: Dict[str, FunctionRecord],
+        features: Dict[str, FeatureRecord],
+    ) -> None:
+        """Save graph to store using batch operations for better performance."""
+        # Remove stale data
+        existing_functions = self.store.list_functions(project_id)
+        current_paths = set(functions_by_path.keys())
+        for fn in existing_functions:
+            if fn.function_path not in current_paths:
+                self.store.delete_function(project_id, fn.function_path)
+
+        existing_features = self.store.list_features(project_id)
+        current_features = set(features.keys())
+        for feat in existing_features:
+            if feat.feature_name not in current_features:
+                self.store.delete_feature(project_id, feat.feature_name)
+
+        # Batch write features and functions
+        self.store.save_features_batch(project_id, list(features.values()))
+        self.store.save_functions_batch(project_id, list(functions_by_path.values()))
+
+        feature_map = dict(sorted({name: name for name in features}.items()))
+        function_map = dict(sorted({name: name for name in functions_by_path}.items()))
+
+        index = GraphIndex(
+            project_id=project_id,
+            updated_at=utc_now_iso(),
+            total_features=len(feature_map),
+            total_functions=len(function_map),
+            features=feature_map,
+            functions=function_map,
+        )
+        self.store.save_index(project_id, index)
 
     def _extract_file_intents_from_cache(
         self,
@@ -226,6 +412,7 @@ class TrellisEngine:
         function_path: str,
         change_summary: str,
         include_suggestions: bool,
+        depth_mode: str = "standard",
     ) -> ImpactReport:
         resolved = self._resolve_function_path(project_id, function_path)
         if resolved is None:
@@ -241,23 +428,11 @@ class TrellisEngine:
         if root is None:
             raise ValueError(f"Function not found: {function_path}")
 
-        impacted_functions = self._transitive_callers(project_id, root.function_path)
-        # Batch load all impacted functions at once
-        loaded_funcs = self.store.load_functions_batch(project_id, impacted_functions)
-
-        # Multi-dimensional impact analysis
-        impact_analysis = self._analyze_impact_multi_dimension(
-            project_id, root, impacted_functions, loaded_funcs, change_summary
-        )
-
-        return ImpactReport(
+        return self.impact_analyzer.analyze_impact(
             project_id=project_id,
-            root_function=root.function_path,
+            root_function=root,
             change_summary=change_summary,
-            impacted_features=impact_analysis["features"],
-            impacted_functions=impact_analysis["functions"],
-            risk_level=impact_analysis["risk"],
-            suggestions=impact_analysis["suggestions"],
+            depth_mode=depth_mode,
         )
 
     def _analyze_impact_multi_dimension(
@@ -585,6 +760,20 @@ class TrellisEngine:
             ]
 
         return FunctionDetail(project_id=project_id, function=fn, callers=callers, callees=callees)
+
+    def detect_hotspots(self, project_id: str) -> HotspotReport:
+        """Detect architectural hotspots with centrality metrics."""
+        return self.impact_analyzer.detect_hotspots(project_id)
+
+    def analyze_diff(
+        self, project_id: str, repo_path: str, diff_source: str = "git"
+    ) -> DiffImpactReport:
+        """Analyze current git diff and rank impact in real-time."""
+        return self.impact_analyzer.analyze_diff(project_id, repo_path, diff_source)
+
+    def get_boundary_map(self, project_id: str) -> List[BoundaryMap]:
+        """Map features to module boundaries and detect violations."""
+        return self.impact_analyzer.get_boundary_map(project_id)
 
     def _resolve_function_path(self, project_id: str, function_path: str) -> Optional[str]:
         """Resolve a function path with fuzzy fallback."""
