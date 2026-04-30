@@ -204,7 +204,10 @@ class CodeGraphBridge:
             args["language"] = language
         
         result = self._call("semantic_code_search", **args)
-        return result.get("results", [])
+        # Handle both dict with "results" key and direct list
+        if isinstance(result, list):
+            return result
+        return result.get("results", []) if isinstance(result, dict) else []
     
     def get_call_graph(
         self,
