@@ -15,6 +15,8 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+# Avoid circular import - FeatureImpactAnalyzer imported inside methods
+
 
 class CodeGraphBridge:
     """Bridge to code-graph-mcp binary via JSON-RPC over stdio.
@@ -509,3 +511,52 @@ class CodeGraphBridge:
             "risk_level": impact.get("risk_level", "unknown"),
             "view_mode": "impact"
         }
+    
+    # ------------------------------------------------------------------
+    # Feature Impact Analysis
+    # ------------------------------------------------------------------
+    
+    def get_feature_impact(self, symbol: str, depth: int = 2) -> Dict[str, Any]:
+        """Get feature-level impact analysis.
+        
+        Combines technical impact with feature context from project.md.
+        
+        Args:
+            symbol: Function/symbol to analyze
+            depth: Call graph depth
+            
+        Returns:
+            Feature impact report with development pointers
+        """
+        from .feature_impact import FeatureImpactAnalyzer
+        analyzer = FeatureImpactAnalyzer(self, str(self.project_path))
+        return analyzer.generate_feature_report(symbol, depth=depth)
+    
+    def get_feature_context(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Get feature context for a function.
+        
+        Returns:
+            Feature details, decisions, constraints
+        """
+        from .feature_impact import FeatureImpactAnalyzer
+        analyzer = FeatureImpactAnalyzer(self, str(self.project_path))
+        return analyzer.get_feature_context(symbol)
+    
+    def get_development_pointers(self, symbol: str) -> List[str]:
+        """Get development pointers for a function.
+        
+        Returns actionable insights for coding agent.
+        """
+        from .feature_impact import FeatureImpactAnalyzer
+        analyzer = FeatureImpactAnalyzer(self, str(self.project_path))
+        return analyzer.get_development_pointers(symbol)
+    
+    def check_feature_divergence(self, symbol: str) -> List[str]:
+        """Check if function diverges from feature spec.
+        
+        Returns:
+            List of divergence warnings
+        """
+        from .feature_impact import FeatureImpactAnalyzer
+        analyzer = FeatureImpactAnalyzer(self, str(self.project_path))
+        return analyzer.check_divergence(symbol)

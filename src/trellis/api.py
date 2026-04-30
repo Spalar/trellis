@@ -117,6 +117,72 @@ async def get_module(project_id: str, module_path: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/feature/{project_id}/impact/{symbol}")
+async def get_feature_impact(project_id: str, symbol: str, depth: int = 2):
+    """Get feature-level impact analysis.
+    
+    Returns technical impact + feature context + development pointers.
+    """
+    try:
+        project_path = _resolve_project_path(project_id)
+        bridge = get_bridge(str(project_path))
+        
+        report = bridge.get_feature_impact(symbol, depth=depth)
+        return JSONResponse(content=report)
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/feature/{project_id}/context/{symbol}")
+async def get_feature_context(project_id: str, symbol: str):
+    """Get feature context for a function."""
+    try:
+        project_path = _resolve_project_path(project_id)
+        bridge = get_bridge(str(project_path))
+        
+        context = bridge.get_feature_context(symbol)
+        if context:
+            return JSONResponse(content=context)
+        else:
+            raise HTTPException(status_code=404, detail="No feature context found")
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/feature/{project_id}/pointers/{symbol}")
+async def get_development_pointers(project_id: str, symbol: str):
+    """Get development pointers for a function."""
+    try:
+        project_path = _resolve_project_path(project_id)
+        bridge = get_bridge(str(project_path))
+        
+        pointers = bridge.get_development_pointers(symbol)
+        return JSONResponse(content={"pointers": pointers})
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/feature/{project_id}/divergence/{symbol}")
+async def check_divergence(project_id: str, symbol: str):
+    """Check if function diverges from feature spec."""
+    try:
+        project_path = _resolve_project_path(project_id)
+        bridge = get_bridge(str(project_path))
+        
+        warnings = bridge.check_feature_divergence(symbol)
+        return JSONResponse(content={
+            "symbol": symbol,
+            "divergence_warnings": warnings,
+            "has_divergence": len(warnings) > 0
+        })
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/health/{project_id}")
 async def health_check(project_id: str):
     """Get index health status."""
