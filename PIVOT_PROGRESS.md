@@ -35,12 +35,21 @@
 - [x] **Full view** (small repos): All functions with relationships
 - [x] Impact view: Root function + affected nodes with risk colors
 
+### Feature Impact Layer
+- [x] Parse project.md with features, decisions, constraints
+- [x] Map functions to features based on file paths
+- [x] Feature impact analysis with development pointers
+- [x] Divergence detection from feature specs
+- [x] Feature impact API endpoints
+
 ### Testing
 - [x] test_bridge_smoke.py - Import and binary detection
 - [x] test_bridge_e2e.py - End-to-end with indexing
 - [x] test_bridge_queries.py - Specific query tests
 - [x] test_visualizer_api.py - Visualizer data format
 - [x] test_view_modes.py - Size-based view testing
+- [x] test_feature_impact.py - Feature parsing
+- [x] test_feature_api.py - Feature impact API
 
 ## Architecture
 
@@ -50,11 +59,14 @@ trellis/
 ├── bin/code-graph-mcp.exe         # Compiled binary
 ├── src/trellis/
 │   ├── __init__.py               # Package exports
-│   ├── bridge.py                 # Python wrapper
+│   ├── bridge.py                 # Python wrapper (JSON-RPC)
+│   ├── feature_impact.py         # Feature impact analysis
 │   └── api.py                    # FastAPI server
 ├── scripts/
 │   ├── build_bridge.py           # Build from source
 │   └── security_scan.py          # Audit submodule
+├── tests/
+│   └── project.md                # Sample spec for testing
 ├── visualizer.html               # D3.js graph UI
 ├── start_server.py               # Launch API server
 └── SETUP.md                      # Setup instructions
@@ -83,17 +95,28 @@ trellis/
 3. [ ] Port spec_manager to use bridge
 4. [ ] Add project.md validation feature
 
+### Feature Impact Layer (Completed)
+5. [x] ProjectContextParser - Parse project.md into structured features
+6. [x] FeatureImpactAnalyzer - Combine technical + feature impact
+7. [x] Feature impact endpoints:
+   - GET /feature/{project_id}/impact/{symbol}
+   - GET /feature/{project_id}/context/{symbol}
+   - GET /feature/{project_id}/pointers/{symbol}
+   - GET /feature/{project_id}/divergence/{symbol}
+8. [x] Development pointers for coding agents
+9. [x] Divergence detection from feature specs
+
 ### Short Term (Next 2 Weeks)
-5. [ ] Implement PR analyzer workflow
-6. [ ] Add team coordination features
-7. [ ] Create analytics dashboard for bridge usage
-8. [ ] Test with large codebase (OmniDoc)
+10. [ ] Implement PR analyzer workflow
+11. [ ] Add team coordination features
+12. [ ] Create analytics dashboard for bridge usage
+13. [ ] Test with large codebase (OmniDoc)
 
 ### Long Term
-9. [ ] Build web dashboard for team workflows
-10. [ ] Add Python tooling integrations (pytest, mypy)
-11. [ ] Package for pip install
-12. [ ] Write comprehensive documentation
+14. [ ] Build web dashboard for team workflows
+15. [ ] Add Python tooling integrations (pytest, mypy)
+16. [ ] Package for pip install
+17. [ ] Write comprehensive documentation
 
 ## Performance
 
