@@ -18,7 +18,7 @@ def run_cargo_audit(source_dir: Path) -> bool:
     Returns:
         True if no vulnerabilities found
     """
-    print("🔍 Running cargo audit...")
+    print("[SCAN] Running cargo audit...")
     
     # Check if cargo-audit is installed
     result = subprocess.run(
@@ -28,7 +28,7 @@ def run_cargo_audit(source_dir: Path) -> bool:
     )
     
     if result.returncode != 0:
-        print("⚠️  cargo-audit not installed. Installing...")
+        print("[INFO] cargo-audit not installed. Installing...")
         subprocess.run(
             ["cargo", "install", "cargo-audit"],
             check=True
@@ -43,11 +43,11 @@ def run_cargo_audit(source_dir: Path) -> bool:
     )
     
     if "error" in result.stdout.lower() or result.returncode != 0:
-        print("❌ Vulnerabilities found!")
+        print("[FAIL] Vulnerabilities found!")
         print(result.stdout)
         return False
     
-    print("✅ No known vulnerabilities in dependencies")
+    print("[PASS] No known vulnerabilities in dependencies")
     return True
 
 
@@ -57,7 +57,7 @@ def scan_for_suspicious_patterns(source_dir: Path) -> bool:
     Returns:
         True if no issues found
     """
-    print("🔍 Scanning for suspicious patterns...")
+    print("[SCAN] Scanning for suspicious patterns...")
     
     suspicious_patterns = {
         "Network operations": ["std::net::", "tokio::net::", "reqwest::"],
@@ -69,13 +69,13 @@ def scan_for_suspicious_patterns(source_dir: Path) -> bool:
     
     src_dir = source_dir / "src"
     if not src_dir.exists():
-        print("⚠️  Source directory not found, skipping pattern scan")
+        print("[WARN]  Source directory not found, skipping pattern scan")
         return True
     
     issues = []
     
     for rust_file in src_dir.rglob("*.rs"):
-        content = rust_file.read_text()
+        content = rust_file.read_text(encoding="utf-8", errors="replace")
         rel_path = rust_file.relative_to(source_dir)
         
         for category, patterns in suspicious_patterns.items():
@@ -84,7 +84,7 @@ def scan_for_suspicious_patterns(source_dir: Path) -> bool:
                     issues.append(f"{rel_path}: {category} ({pattern})")
     
     if issues:
-        print("⚠️  Suspicious patterns found (manual review recommended):")
+        print("[WARN]  Suspicious patterns found (manual review recommended):")
         for issue in issues[:20]:  # Limit output
             print(f"  - {issue}")
         
@@ -93,7 +93,7 @@ def scan_for_suspicious_patterns(source_dir: Path) -> bool:
         
         return False
     
-    print("✅ No suspicious patterns found")
+    print("[PASS] No suspicious patterns found")
     return True
 
 
@@ -103,7 +103,7 @@ def check_for_backdoors(source_dir: Path) -> bool:
     Returns:
         True if clean
     """
-    print("🔍 Checking for potential backdoors...")
+    print("[SCAN] Checking for potential backdoors...")
     
     danger_patterns = [
         "eval(",
@@ -116,7 +116,7 @@ def check_for_backdoors(source_dir: Path) -> bool:
     issues = []
     
     for rust_file in src_dir.rglob("*.rs"):
-        content = rust_file.read_text()
+        content = rust_file.read_text(encoding="utf-8", errors="replace")
         rel_path = rust_file.relative_to(source_dir)
         
         for pattern in danger_patterns:
@@ -124,12 +124,12 @@ def check_for_backdoors(source_dir: Path) -> bool:
                 issues.append(f"{rel_path}: contains '{pattern}'")
     
     if issues:
-        print("⚠️  Dangerous patterns found:")
+        print("[WARN]  Dangerous patterns found:")
         for issue in issues:
             print(f"  - {issue}")
         return False
     
-    print("✅ No dangerous patterns found")
+    print("[PASS] No dangerous patterns found")
     return True
 
 
@@ -146,7 +146,7 @@ def verify_checksum(source_dir: Path, expected_hash: str = None) -> bool:
     if not expected_hash:
         return True
     
-    print(f"🔍 Verifying commit hash: {expected_hash}...")
+    print(f"[SCAN] Verifying commit hash: {expected_hash}...")
     
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -158,12 +158,12 @@ def verify_checksum(source_dir: Path, expected_hash: str = None) -> bool:
     actual_hash = result.stdout.strip()
     
     if actual_hash != expected_hash:
-        print(f"❌ Hash mismatch!")
+        print(f"[FAIL] Hash mismatch!")
         print(f"   Expected: {expected_hash}")
         print(f"   Actual:   {actual_hash}")
         return False
     
-    print("✅ Commit hash verified")
+    print("[PASS] Commit hash verified")
     return True
 
 
@@ -197,10 +197,10 @@ def main():
         source_dir = get_project_root() / "third_party" / "code-graph-mcp"
     
     if not source_dir.exists():
-        print(f"❌ Source directory not found: {source_dir}")
+        print(f"[FAIL] Source directory not found: {source_dir}")
         sys.exit(1)
     
-    print(f"🔒 Security Scan: {source_dir}")
+    print(f"[SEC] Security Scan: {source_dir}")
     print("=" * 50)
     
     results = []
@@ -217,10 +217,10 @@ def main():
     
     print("\n" + "=" * 50)
     if all(results):
-        print("✅ All security checks passed!")
+        print("[PASS] All security checks passed!")
         sys.exit(0)
     else:
-        print("⚠️  Some checks failed. Review output above.")
+        print("[WARN] Some checks failed. Review output above.")
         sys.exit(1)
 
 

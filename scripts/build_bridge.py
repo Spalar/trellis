@@ -30,12 +30,12 @@ def build_code_graph(source_dir: Path, release: bool = True) -> Path:
         Path to compiled binary
     """
     if not check_rust_toolchain():
-        print("❌ Rust toolchain not found!")
+        print("[FAIL] Rust toolchain not found!")
         print("   Install from: https://rustup.rs/")
         print("   Or download pre-built binary from GitHub releases")
         sys.exit(1)
     
-    print(f"🔨 Building code-graph-mcp from {source_dir}...")
+    print(f"[BUILD] Building code-graph-mcp from {source_dir}...")
     
     # Build command
     cmd = ["cargo", "build"]
@@ -51,7 +51,7 @@ def build_code_graph(source_dir: Path, release: bool = True) -> Path:
     )
     
     if result.returncode != 0:
-        print("❌ Build failed!")
+        print("[FAIL] Build failed!")
         print(result.stderr)
         sys.exit(1)
     
@@ -72,11 +72,11 @@ def build_code_graph(source_dir: Path, release: bool = True) -> Path:
             break
     
     if not binary:
-        print("❌ Binary not found after build!")
+        print("[FAIL] Binary not found after build!")
         print(f"   Checked: {target_dir}")
         sys.exit(1)
     
-    print(f"✅ Build successful: {binary}")
+    print(f"[PASS] Build successful: {binary}")
     return binary
 
 
@@ -106,7 +106,7 @@ def install_binary(binary: Path, install_dir: Path) -> Path:
     if sys.platform != "win32":
         os.chmod(dest, 0o755)
     
-    print(f"✅ Installed: {dest}")
+    print(f"[PASS] Installed: {dest}")
     return dest
 
 
@@ -148,13 +148,13 @@ def main():
         source_dir = get_project_root() / "third_party" / "code-graph-mcp"
     
     if not source_dir.exists():
-        print(f"❌ Source directory not found: {source_dir}")
+        print(f"[FAIL] Source directory not found: {source_dir}")
         print("   Run: git submodule update --init")
         sys.exit(1)
     
     # Get version
     version = get_version_from_source(source_dir)
-    print(f"📦 code-graph-mcp version: {version}")
+    print(f"[PKG] code-graph-mcp version: {version}")
     
     # Build
     binary = build_code_graph(source_dir, release=not args.debug)
@@ -167,7 +167,7 @@ def main():
     version_file = install_dir / "version.txt"
     version_file.write_text(f"{version}\n")
     
-    print(f"\n🎉 code-graph-mcp v{version} ready at: {installed}")
+    print(f"\n[DONE] code-graph-mcp v{version} ready at: {installed}")
     print("\nTo use:")
     print("  1. Add 'bin/' to your PATH, or")
     print("  2. Use CodeGraphBridge which auto-detects the binary")

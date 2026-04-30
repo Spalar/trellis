@@ -118,3 +118,4 @@ Thumbs.db
 #Pipfile.lock
 #poetry.lock
 #uv.lock
+.code-graph/

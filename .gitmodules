@@ -1,0 +1,3 @@
+[submodule "third_party/code-graph-mcp"]
+	path = third_party/code-graph-mcp
+	url = https://github.com/Spalar/code-graph-mcp.git
