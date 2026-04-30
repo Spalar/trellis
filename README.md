@@ -1,185 +1,245 @@
-# trellis
+# Trellis - Feature Impact Analysis for Code
 
-Trellis Core is a focused MCP graph service.
+Trellis is a Python-native code graph workflow layer built on top of **code-graph-mcp**.
 
-It knows:
-- `project_id` as the graph namespace
-- API key access control for this MCP server
-- feature/function graphs and impact analysis
-- feature intent extraction from docstrings and code structure
+It provides **feature-level impact analysis** on top of technical code graph analysis, helping coding agents understand not just *what* changed, but *why* decisions were made and *what constraints* must be maintained.
 
-It does not know:
-- users, organizations, billing, or quotas
+## What It Does
 
-## Core Files
+### Technical Impact (from code-graph-mcp)
+- "This function calls 5 other functions"
+- "Risk level: HIGH"
 
-- `server.py`: FastMCP server and MCP tools
-- `auth.py`: bearer API key validation
-- `store.py`: project-scoped JSON storage backend
-- `extractor.py`: Python, JavaScript, TypeScript AST extraction using tree-sitter
-- `engine.py`: graph sync, feature/function context, impact analysis
-- `router.py`: in-memory feature index cache
-- `models.py`: response and graph models
-- `visualizer.py`: graph export & impact subgraph generator
-- `visualizer.html`: standalone interactive 2D force-directed graph UI
-- `spec_manager.py`: project.md spec read/write/parse
-- `.trellis/config.yaml`: optional project configuration (see Configuration section)
-- `.env.example`: sample environment variables file
+### Feature Impact (from Trellis)
+- "This change affects the Authentication feature"
+- "Decision AUTH-001 says use JWT tokens - are you maintaining that?"
+- "Constraint: Token expiry must be < 24 hours"
+- "Dependency: User Management depends on this"
 
-## Visualizer
+## Quick Start
 
-Trellis includes an interactive 2D graph visualizer styled like Firefox's tracker blocker.
+### 1. Start the Server
 
-Open it in your browser when the server is running in HTTP mode:
 ```bash
-open http://localhost:17317/visualizer
+python start_server.py
 ```
 
-If you need to pick a different project, pass `?project_id=your-project` in the URL.
+Server runs on http://localhost:17318
 
-### What the visualizer shows
-- **Feature nodes** (colored rectangles) — each represents a feature with a count badge
-- **Function nodes** (colored dots) — each function; color matches its parent feature
-- **Feature dependencies** — gray dashed links between feature rectangles
-- **Call graph** — cyan glowing links showing which function calls which (disabled by default)
-- **Containment** — faint dashed links connecting functions to their feature
-- **Project Info** — sidebar shows feature/function counts and project spec status
-
-### Interactions
-- **Pan** — drag on empty canvas
-- **Zoom** — scroll wheel
-- **Select** — click a node to highlight its neighbors
-- **Filters** — top-right pills toggle layers (features, functions, deps, calls)
-- **Impact Mode** — click "Impact Mode" to view only the upstream callers for a selected function
-- **Fit** — click "Fit" to reset the zoom
-
-## MCP Tools
-
-- `trellis_sync` — sync a codebase into the graph
-- `trellis_get_feature` — get feature context and dependencies
-- `trellis_analyze_impact` — function-level impact analysis
-- `trellis_analyze_feature_impact` — **feature-level impact analysis** (all functions in a feature)
-- `trellis_trace_path` — trace dependency path between features
-- `trellis_search` — search graph metadata
-- `trellis_list_features` — list discovered features
-- `trellis_get_function` — get function detail with callers/callees
-- `trellis_visualize_graph` — get visualizer URL
-
-## Endpoints
-
-- `GET /` — redirects to `/visualizer`
-- `GET /visualizer` — graph visualizer HTML app
-- `GET /graph/{project_id}` — full graph as D3 nodes/links JSON
-- `GET /graph/{project_id}/impact/{function_path}` — impact subgraph JSON
-- `GET /spec/{project_id}` — get project.md spec
-- `POST /spec/{project_id}` — save project.md spec
-- `GET /health` — health check
-
-## Local Setup
+### 2. Index Your Repo
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate
+cd your-project
+path/to/trellis/bin/code-graph-mcp.exe rebuild-index --confirm
+```
+
+### 3. Query the API
+
+```bash
+# Health check
+curl http://localhost:17318/health/your-project
+
+# Full graph (auto-simplified if >200 functions)
+curl http://localhost:17318/graph/your-project
+
+# Impact analysis
+curl http://localhost:17318/graph/your-project/impact/authenticate_user
+
+# Feature impact with development pointers
+curl http://localhost:17318/feature/your-project/impact/authenticate_user
+
+# Development pointers for coding agent
+curl http://localhost:17318/feature/your-project/pointers/authenticate_user
+
+# Check for spec divergence
+curl http://localhost:17318/feature/your-project/divergence/authenticate_user
+```
+
+### 4. Open Visualizer
+
+Open `visualizer.html` in your browser or visit http://localhost:17318/
+
+## Architecture
+
+```
+Trellis
+├── code-graph-mcp (Rust submodule)
+│   ├── AST parsing (16 languages)
+│   ├── Call graph analysis
+│   ├── Impact analysis
+│   └── JSON-RPC API
+│
+├── Trellis Bridge (Python)
+│   ├── CodeGraphBridge - JSON-RPC wrapper
+│   ├── FeatureImpactAnalyzer - Feature context
+│   └── FastAPI server - REST endpoints
+│
+└── project.md - Feature specifications
+    ├── Feature definitions
+    ├── Decisions with rationale
+    ├── Constraints
+    └── File patterns
+```
+
+## API Endpoints
+
+### Graph Endpoints
+- `GET /graph/{project_id}` - Full or simplified graph
+- `GET /graph/{project_id}/impact/{symbol}` - Impact graph
+- `GET /graph/{project_id}/search?q={query}` - Symbol search
+- `GET /graph/{project_id}/node/{symbol}` - Node details
+- `GET /graph/{project_id}/module/{path}` - Module overview
+
+### Feature Endpoints
+- `GET /feature/{project_id}/impact/{symbol}` - Feature impact report
+- `GET /feature/{project_id}/context/{symbol}` - Feature context
+- `GET /feature/{project_id}/pointers/{symbol}` - Development pointers
+- `GET /feature/{project_id}/divergence/{symbol}` - Spec divergence check
+
+### Health
+- `GET /health/{project_id}` - Index status
+
+## Python Usage
+
+```python
+from src.trellis import CodeGraphBridge
+
+# Initialize for a project
+bridge = CodeGraphBridge("/path/to/your/repo")
+
+# Get feature impact report
+report = bridge.get_feature_impact("authenticate_user")
+
+# Print development pointers for coding agent
+for pointer in report['development_pointers']:
+    print(f"- {pointer}")
+
+# Check for divergence from spec
+warnings = bridge.check_feature_divergence("authenticate_user")
+for w in warnings:
+    print(f"⚠️ {w}")
+
+# Get technical impact only
+impact = bridge.analyze_impact("authenticate_user")
+print(f"Risk: {impact['risk_level']}")
+
+# Search symbols
+results = bridge.search("auth", limit=10)
+```
+
+## project.md Format
+
+```markdown
+## Feature: Authentication
+
+Handles user authentication and session management.
+
+### Decisions
+- AUTH-001: Use JWT tokens (because: scales horizontally)
+  - Constraint: Token expiry must be < 24 hours
+  - Constraint: Refresh tokens stored in httpOnly cookies
+- AUTH-002: Password hashing with bcrypt (because: industry standard)
+  - Constraint: Minimum 12 rounds
+
+### Files
+- src/auth/**
+- src/middleware/auth*
+
+### Dependencies
+- Feature: User Management
+
+### Constraints
+- All auth endpoints must return within 200ms
+- Rate limiting: 5 attempts per minute
+```
+
+## Setup
+
+### Prerequisites
+- Python 3.11+
+- Rust (for building from source) or Node.js (for npm install)
+
+### Install
+
+```bash
+# Clone
+git clone https://github.com/YOUR_USERNAME/trellis.git
+cd trellis
+
+# Add submodule (forked code-graph-mcp)
+git submodule update --init
+
+# Build binary
+python scripts/build_bridge.py
+
+# Install Python deps
 pip install -r requirements.txt
 ```
 
-## Run
+### Configure
 
-### Option A — Regular server (no Docker)
-
-```bash
-# Development (no auth)
-make run-http
-
-# Or manually:
-TRELLIS_TRANSPORT=http TRELLIS_ALLOW_NO_AUTH=true python server.py
-
-# Production (API key required)
-TRELLIS_TRANSPORT=http TRELLIS_API_KEY=your-secret-key python server.py
+Create `.env`:
+```
+TRELLIS_TRANSPORT=stdio
+TRELLIS_ALLOW_NO_AUTH=true
 ```
 
-MCP endpoint (HTTP transport):
-- `http://localhost:17317/mcp`
+## Configuration Files
 
-Health endpoint:
-- `http://localhost:17317/health`
+- `.env` - Environment variables
+- `opencode.json` - MCP client configuration
+- `project.md` - Feature specifications
 
-### Option B — Docker
-
-```bash
-make compose-up
-make check
-make compose-down
-```
-
-Docker is **optional** — Trellis works fine as a regular Python process on any server or VM.
-
-## Makefile Workflow
-
-```bash
-make install
-make dev
-```
-
-`make dev` runs local stdio in no-auth mode for development.
-
-Generate ready-to-paste VS Code MCP config:
-
-```bash
-make trellis-dev-vscode
-```
-
-On Windows, stopping `make dev` with Ctrl+C can return a non-zero make exit code even when startup was successful. Treat the startup log line as the health signal for stdio mode.
-
-## Configuration
-
-Trellis has two levels of configuration:
-
-### 1. Project Config (`.trellis/config.yaml`)
-
-Optional per-project configuration file:
-
-```yaml
-# Example .trellis/config.yaml
-project_name: my-project
-
-extraction:
-  languages:
-    - python
-    - javascript
-    - typescript
-  exclude:
-    - node_modules
-    - .venv
-    - __pycache__
-  include:
-    - "*.py"
-    - "*.js"
-    - "*.ts"
-
-features:
-  grouping_strategy: module  # module, directory, or custom
+## Project Structure
 
 ```
-
-A sample config is provided at `.trellis/config.yaml`. Trellis uses sensible defaults, so this file is optional.
-
-### 2. Environment Variables
-
-Copy `.env.example` to `.env` and configure:
-
-```bash
-cp .env.example .env
-# Edit .env with your settings
+trellis/
+├── bin/                    # Compiled binary (auto-built)
+├── scripts/
+│   ├── build_bridge.py     # Build from source
+│   └── security_scan.py    # Audit submodule
+├── src/trellis/
+│   ├── bridge.py           # code-graph-mcp wrapper
+│   ├── feature_impact.py   # Feature analysis
+│   └── api.py              # FastAPI server
+├── tests/
+│   └── project.md          # Sample spec
+├── third_party/
+│   └── code-graph-mcp/     # Forked submodule
+├── visualizer.html         # Interactive graph UI
+├── start_server.py         # Launch script
+└── SETUP.md               # Detailed setup guide
 ```
 
-See `.env.example` for all available server settings.
+## Key Features
 
-## Environment
+- **Smart View Modes**: Full detail (<200 functions) or simplified overview (>200)
+- **Feature Impact**: Combines technical + feature-level analysis
+- **Development Pointers**: Actionable guidance for coding agents
+- **Divergence Detection**: Warns when code violates feature specs
+- **Security**: Build from source, audit submodule, pin versions
 
-- `TRELLIS_API_KEY`: API key required for authenticated access via `Authorization: Bearer <key>`
-- `TRELLIS_ALLOW_NO_AUTH`: optional local-dev override. Set to `true` only for local testing when `TRELLIS_API_KEY` is not set
-- `TRELLIS_DATA_DIR`: optional override for graph storage root (default: `.trellis/data`)
-- `TRELLIS_TRANSPORT`: `stdio` (default), `http`, or `sse`
-- `TRELLIS_HOST`: bind host for HTTP/SSE transport (default: `0.0.0.0`)
-- `TRELLIS_PORT`: bind port for HTTP/SSE transport (default: `17317`)
+## Performance
+
+- Indexing: 300+ files/sec (code-graph-mcp)
+- Search: <100ms
+- Impact analysis: <200ms
+- Health check: <50ms
+
+## Security
+
+- Submodule pinned to v0.17.3
+- Build from source (auditable)
+- Security scan: `python scripts/security_scan.py`
+- Forked repo (not dependent on upstream)
+
+## Documentation
+
+- `SETUP.md` - Setup instructions
+- `MIGRATION.md` - Migrating old code
+- `FEATURE_IMPACT_EXAMPLE.md` - Feature impact examples
+- `PIVOT_PROGRESS.md` - Development progress
+
+## License
+
+MIT
