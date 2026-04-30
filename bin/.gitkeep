@@ -1,0 +1,3 @@
+# This directory contains compiled code-graph-mcp binaries
+# These are auto-built from the submodule and should not be committed
+# Use: python scripts/build_bridge.py
