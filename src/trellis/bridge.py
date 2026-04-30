@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 
 class CodeGraphBridge:
@@ -85,7 +85,6 @@ class CodeGraphBridge:
                 return
             
             env = os.environ.copy()
-            env["CODE_GRAPH_PROJECT"] = str(self.project_path)
             
             self._proc = subprocess.Popen(
                 [str(self.binary_path)],
@@ -94,10 +93,11 @@ class CodeGraphBridge:
                 stderr=subprocess.PIPE,
                 text=True,
                 env=env,
+                cwd=str(self.project_path),  # Run in project directory
                 bufsize=1,  # Line buffered
             )
     
-    def _call(self, tool_name: str, **arguments) -> Dict[str, Any]:
+    def _call(self, tool_name: str, **arguments) -> Union[Dict, List, str]:
         """Call an MCP tool via JSON-RPC.
         
         Args:
@@ -105,7 +105,7 @@ class CodeGraphBridge:
             **arguments: Tool arguments
             
         Returns:
-            Tool result as dict
+            Tool result (dict, list, or string)
         """
         self._ensure_running()
         
@@ -151,7 +151,7 @@ class CodeGraphBridge:
                     try:
                         return json.loads(text)
                     except json.JSONDecodeError:
-                        return {"text": text}
+                        return text
             
             return result
     
@@ -176,38 +176,33 @@ class CodeGraphBridge:
     # High-level API
     # ------------------------------------------------------------------
     
+    def _normalize_result(self, result: Any) -> Dict[str, Any]:
+        """Normalize MCP result to dict format."""
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, list):
+            return {"results": result}
+        if isinstance(result, str):
+            return {"text": result}
+        return {}
+    
     def analyze_impact(self, symbol: str, depth: int = 3) -> Dict[str, Any]:
-        """Analyze impact of changing a symbol.
-        
-        Args:
-            symbol: Function/symbol name to analyze
-            depth: Call graph traversal depth
-            
-        Returns:
-            Impact report with risk_level, affected_functions, etc.
-        """
-        return self._call("impact_analysis", symbol=symbol, depth=depth)
+        """Analyze impact of changing a symbol."""
+        result = self._call("impact_analysis", symbol=symbol, depth=depth)
+        return self._normalize_result(result)
     
     def search(self, query: str, language: str = None, limit: int = 10) -> List[Dict[str, Any]]:
-        """Semantic code search.
-        
-        Args:
-            query: Search query
-            language: Filter by language (optional)
-            limit: Max results
-            
-        Returns:
-            List of matching symbols
-        """
+        """Semantic code search."""
         args = {"query": query, "limit": limit}
         if language:
             args["language"] = language
         
         result = self._call("semantic_code_search", **args)
-        # Handle both dict with "results" key and direct list
         if isinstance(result, list):
             return result
-        return result.get("results", []) if isinstance(result, dict) else []
+        if isinstance(result, dict):
+            return result.get("results", [])
+        return []
     
     def get_call_graph(
         self,
@@ -215,117 +210,302 @@ class CodeGraphBridge:
         direction: str = "both",
         depth: int = 2,
     ) -> Dict[str, Any]:
-        """Get call graph for a symbol.
-        
-        Args:
-            symbol: Function/symbol name
-            direction: "callers", "callees", or "both"
-            depth: Traversal depth
-            
-        Returns:
-            Call graph structure
-        """
-        return self._call(
+        """Get call graph for a symbol."""
+        result = self._call(
             "get_call_graph",
             symbol=symbol,
             direction=direction,
             depth=depth,
         )
+        return self._normalize_result(result)
     
     def get_ast_node(self, symbol: str, include_source: bool = True) -> Dict[str, Any]:
-        """Get detailed info about a symbol.
-        
-        Args:
-            symbol: Symbol name
-            include_source: Include source code in result
-            
-        Returns:
-            AST node details
-        """
-        return self._call(
+        """Get detailed info about a symbol."""
+        result = self._call(
             "get_ast_node",
             symbol=symbol,
             include_source=include_source,
         )
+        return self._normalize_result(result)
     
     def find_references(self, symbol: str, include_tests: bool = True) -> List[Dict[str, Any]]:
-        """Find all references to a symbol.
-        
-        Args:
-            symbol: Symbol to find references for
-            include_tests: Include test references
-            
-        Returns:
-            List of references
-        """
+        """Find all references to a symbol."""
         result = self._call(
             "find_references",
             symbol=symbol,
             include_tests=include_tests,
         )
-        return result.get("references", [])
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            return result.get("references", [])
+        return []
     
     def project_map(self) -> Dict[str, Any]:
-        """Get full project architecture overview.
-        
-        Returns:
-            Project structure with modules, entry points, hot functions
-        """
-        return self._call("project_map")
+        """Get full project architecture overview."""
+        result = self._call("project_map")
+        return self._normalize_result(result)
     
     def module_overview(self, module_path: str) -> Dict[str, Any]:
-        """Get overview of a specific module.
-        
-        Args:
-            module_path: Path to module (e.g., "src/auth")
-            
-        Returns:
-            Module structure with exports and symbols
-        """
-        return self._call("module_overview", module_path=module_path)
+        """Get overview of a specific module."""
+        result = self._call("module_overview", module_path=module_path)
+        return self._normalize_result(result)
     
     def trace_http_route(self, route: str) -> Dict[str, Any]:
-        """Trace HTTP route to handler and downstream calls.
-        
-        Args:
-            route: Route path (e.g., "/api/users")
-            
-        Returns:
-            Request flow from route to data layer
-        """
-        return self._call("trace_http_chain", route=route)
+        """Trace HTTP route to handler and downstream calls."""
+        result = self._call("trace_http_chain", route=route)
+        return self._normalize_result(result)
     
     def find_dead_code(self, path: str = None) -> List[Dict[str, Any]]:
-        """Find unused code.
-        
-        Args:
-            path: Limit search to path (optional)
-            
-        Returns:
-            List of unused symbols
-        """
+        """Find unused code."""
         args = {}
         if path:
             args["path"] = path
         
         result = self._call("find_dead_code", **args)
-        return result.get("dead_code", [])
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            return result.get("dead_code", [])
+        return []
     
     def dependency_graph(self, file_path: str) -> Dict[str, Any]:
-        """Get dependency graph for a file.
-        
-        Args:
-            file_path: Path to file
-            
-        Returns:
-            Dependencies and dependents
-        """
-        return self._call("dependency_graph", file=file_path)
+        """Get dependency graph for a file."""
+        result = self._call("dependency_graph", file=file_path)
+        return self._normalize_result(result)
     
     def health_check(self) -> Dict[str, Any]:
-        """Check index status and health.
+        """Check index status and health."""
+        result = self._call("get_index_status")
+        return self._normalize_result(result)
+    
+    # ------------------------------------------------------------------
+    # Visualizer API (converts to our format)
+    # ------------------------------------------------------------------
+    
+    def get_graph_for_visualizer(self, max_nodes: int = 200) -> Dict[str, Any]:
+        """Get graph data formatted for the visualizer.
+        
+        Returns nodes and links in our visualizer format.
+        Uses simplified view if >200 functions.
         
         Returns:
-            Health status with node counts, freshness
+            {
+                "nodes": [{"id": "...", "type": "feature|function", ...}],
+                "links": [{"source": "...", "target": "..."}],
+                "stats": {...},
+                "view_mode": "full|simplified"
+            }
         """
-        return self._call("get_index_status")
+        health = self.health_check()
+        total_nodes = health.get("nodes_count", 0)
+        
+        if total_nodes > max_nodes:
+            return self._get_simplified_graph(health)
+        else:
+            return self._get_full_graph()
+    
+    def _get_full_graph(self) -> Dict[str, Any]:
+        """Get full detailed graph for small repos."""
+        # Get project map for structure
+        pmap = self.project_map()
+        
+        nodes = []
+        links = []
+        
+        # Add module nodes as features
+        modules = pmap.get("modules", [])
+        for mod in modules:
+            mod_path = mod.get("path", "")
+            nodes.append({
+                "id": f"mod:{mod_path}",
+                "type": "feature",
+                "label": mod_path,
+                "name": mod_path,
+            })
+        
+        # Search for all functions
+        all_funcs = self.search("*", limit=1000)
+        
+        for func in all_funcs:
+            func_id = func.get("qualified_name", func.get("name", "unknown"))
+            nodes.append({
+                "id": f"func:{func_id}",
+                "type": "function",
+                "label": func.get("name", func_id),
+                "name": func.get("name", ""),
+                "file_path": func.get("file_path", ""),
+                "line": func.get("line", 0),
+                "kind": func.get("kind", "function"),
+            })
+            
+            # Link to module
+            file_path = func.get("file_path", "")
+            if file_path:
+                # Find matching module
+                for mod in modules:
+                    mod_path = mod.get("path", "")
+                    if mod_path and file_path.startswith(mod_path):
+                        links.append({
+                            "source": f"func:{func_id}",
+                            "target": f"mod:{mod_path}",
+                            "type": "belongs_to"
+                        })
+                        break
+        
+        return {
+            "nodes": nodes,
+            "links": links,
+            "stats": {
+                "total_nodes": len(nodes),
+                "total_functions": len([n for n in nodes if n["type"] == "function"]),
+                "total_features": len([n for n in nodes if n["type"] == "feature"]),
+                "total_links": len(links),
+            },
+            "view_mode": "full"
+        }
+    
+    def _get_simplified_graph(self, health: Dict) -> Dict[str, Any]:
+        """Get simplified graph for large repos (>200 functions).
+        
+        Shows only modules and their relationships.
+        """
+        pmap = self.project_map()
+        
+        nodes = []
+        links = []
+        
+        # Add module nodes
+        modules = pmap.get("modules", [])
+        for mod in modules:
+            mod_path = mod.get("path", "")
+            symbol_count = mod.get("symbol_count", 0)
+            nodes.append({
+                "id": f"mod:{mod_path}",
+                "type": "feature",
+                "label": mod_path,
+                "name": mod_path,
+                "symbol_count": symbol_count,
+                "is_module": True,
+            })
+        
+        # Add module dependency links
+        deps = pmap.get("module_dependencies", [])
+        for dep in deps:
+            from_mod = dep.get("from", "")
+            to_mod = dep.get("to", "")
+            if from_mod and to_mod:
+                links.append({
+                    "source": f"mod:{from_mod}",
+                    "target": f"mod:{to_mod}",
+                    "type": "depends_on"
+                })
+        
+        # Add top hot functions as representative samples
+        hot_funcs = pmap.get("hot_functions", [])[:20]  # Limit to top 20
+        for func in hot_funcs:
+            func_name = func.get("name", "")
+            func_id = func.get("qualified_name", func_name)
+            if not func_id:
+                continue
+                
+            nodes.append({
+                "id": f"func:{func_id}",
+                "type": "function",
+                "label": func_name,
+                "name": func_name,
+                "caller_count": func.get("caller_count", 0),
+                "is_hot": True,
+            })
+            
+            # Link to module
+            file_path = func.get("file_path", "")
+            for mod in modules:
+                mod_path = mod.get("path", "")
+                if mod_path and file_path.startswith(mod_path):
+                    links.append({
+                        "source": f"func:{func_id}",
+                        "target": f"mod:{mod_path}",
+                        "type": "belongs_to"
+                    })
+                    break
+        
+        return {
+            "nodes": nodes,
+            "links": links,
+            "stats": {
+                "total_nodes": health.get("nodes_count", 0),
+                "total_functions": health.get("nodes_count", 0),  # Approximate
+                "total_features": len(modules),
+                "total_links": len(links),
+                "shown_nodes": len(nodes),
+                "shown_functions": len([n for n in nodes if n["type"] == "function"]),
+                "note": f"Simplified view: showing {len(nodes)} of {health.get('nodes_count', 0)} nodes",
+            },
+            "view_mode": "simplified"
+        }
+    
+    def get_impact_graph(self, symbol: str, depth: int = 2) -> Dict[str, Any]:
+        """Get impact analysis formatted for visualizer.
+        
+        Returns:
+            {
+                "nodes": [...],
+                "links": [...],
+                "stats": {...},
+                "root_function": "...",
+                "risk_level": "..."
+            }
+        """
+        impact = self.analyze_impact(symbol, depth=depth)
+        
+        nodes = []
+        links = []
+        
+        # Root node
+        root_id = f"func:{symbol}"
+        nodes.append({
+            "id": root_id,
+            "type": "function",
+            "label": symbol,
+            "name": symbol,
+            "is_root": True,
+            "risk_level": impact.get("risk_level", "unknown"),
+        })
+        
+        # Add affected functions
+        affected = impact.get("affected_functions", [])
+        for func in affected:
+            func_name = func.get("name", func.get("qualified_name", "unknown"))
+            func_id = f"func:{func_name}"
+            
+            nodes.append({
+                "id": func_id,
+                "type": "function",
+                "label": func_name,
+                "name": func_name,
+                "file_path": func.get("file_path", ""),
+                "confidence": func.get("confidence", 0),
+                "impact_type": func.get("impact_type", "affected"),
+            })
+            
+            links.append({
+                "source": root_id,
+                "target": func_id,
+                "type": "impacts",
+                "confidence": func.get("confidence", 0),
+            })
+        
+        return {
+            "nodes": nodes,
+            "links": links,
+            "stats": {
+                "total_nodes": len(nodes),
+                "total_links": len(links),
+                "risk_level": impact.get("risk_level", "unknown"),
+                "affected_count": len(affected),
+            },
+            "root_function": symbol,
+            "risk_level": impact.get("risk_level", "unknown"),
+            "view_mode": "impact"
+        }
