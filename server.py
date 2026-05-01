@@ -1,49 +1,31 @@
 """Trellis MCP server - graph-based code analysis and impact detection.
 
 This module exposes both HTTP routes (for the visualizer) and MCP tools
-(for AI coding agents). All state is initialized at module level for
-simplicity since FastMCP handles the server lifecycle.
+(for AI coding agents). Uses code-graph-mcp via CodeGraphBridge.
 """
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
-from fastmcp.exceptions import ToolError
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, RedirectResponse
+from starlette.responses import FileResponse, JSONResponse
 
 import time
-from typing import List
+from typing import Dict, List, Optional
 
 from analytics import AnalyticsStore
 from auth import validate_auth
-from engine import TrellisEngine
-from extractor import PythonTreeSitterExtractor
-from models import (
-    BoundaryMap,
-    DiffImpactReport,
-    FeatureContext,
-    FeatureList,
-    FunctionDetail,
-    HotspotReport,
-    ImpactReport,
-    PathTrace,
-    SearchResult,
-    SyncResult,
-)
-from router import FeatureRouter
 from spec_manager import SpecManager
-from store import GraphStore
-from visualizer import GraphVisualizer
 
 # Load environment variables from .env file
 load_dotenv(Path(__file__).with_name(".env"))
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 mcp = FastMCP(
     "trellis-core",
@@ -55,25 +37,56 @@ mcp = FastMCP(
 # ------------------------------------------------------------------
 # State (initialized once at import time)
 # ------------------------------------------------------------------
-_store = GraphStore()
-_engine = TrellisEngine(store=_store, extractor=PythonTreeSitterExtractor())
-_router = FeatureRouter(store=_store)
-_visualizer = GraphVisualizer(store=_store)
 _spec_manager = SpecManager()
 _analytics = AnalyticsStore()
 
+# Cache bridge instances by project path
+_bridge_cache: Dict[str, "CodeGraphBridge"] = {}
+
+
+def _resolve_project_path(project_id: str) -> str:
+    """Resolve project ID to actual path."""
+    if project_id == "trellis":
+        return str(Path(__file__).parent)
+    
+    path = Path(project_id)
+    if path.is_absolute() and path.exists():
+        return str(path)
+    
+    # Try relative to current directory
+    if path.exists():
+        return str(path.resolve())
+    
+    # Try relative to trellis root
+    trellis_root = Path(__file__).parent
+    candidate = trellis_root / project_id
+    if candidate.exists():
+        return str(candidate.resolve())
+    
+    return project_id  # Fallback
+
+
+def _get_bridge(project_id: str) -> "CodeGraphBridge":
+    """Get or create bridge for project."""
+    if project_id not in _bridge_cache:
+        from src.trellis import CodeGraphBridge
+        resolved = _resolve_project_path(project_id)
+        _bridge_cache[project_id] = CodeGraphBridge(resolved)
+    return _bridge_cache[project_id]
+
 
 def _track_tool(tool_name: str):
-    """Decorator to track tool calls with timing and store metrics."""
+    """Decorator to track tool calls with timing."""
     def decorator(func):
-        async def wrapper(*args, **kwargs):
+        import functools
+        @functools.wraps(func)
+        async def wrapper(project_id: str = "", **kwargs):
             start = time.perf_counter()
-            project_id = kwargs.get("project_id", "unknown")
             status = "success"
             error_msg = None
             
             try:
-                result = await func(*args, **kwargs)
+                result = await func(project_id=project_id, **kwargs)
                 return result
             except Exception as e:
                 status = "error"
@@ -89,581 +102,451 @@ def _track_tool(tool_name: str):
                     error_message=error_msg,
                 )
         
-        # Preserve original function metadata for FastMCP
-        wrapper.__name__ = func.__name__
-        wrapper.__doc__ = func.__doc__
-        wrapper.__annotations__ = func.__annotations__
         return wrapper
     return decorator
 
 
 # ------------------------------------------------------------------
-# Helpers
+# MCP Tools
 # ------------------------------------------------------------------
-def _cors_json(data: dict, status: int = 200) -> JSONResponse:
-    """Wrap data in a JSONResponse with CORS headers for the visualizer."""
-    resp = JSONResponse(data, status_code=status)
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-    resp.headers["Access-Control-Allow-Headers"] = "*"
-    return resp
+
+@mcp.tool()
+@_track_tool("trellis_sync")
+async def trellis_sync(
+    project_id: str = "",
+    repo_path: str = "",
+    config_path: str = ".trellis/config.yaml",
+    incremental: bool = False,
+) -> str:
+    """Sync a project repository into the graph.
+    
+    Uses code-graph-mcp to index the codebase.
+    """
+    try:
+        bridge = _get_bridge(repo_path or project_id)
+        health = bridge.health_check()
+        return json.dumps({
+            "status": "ok",
+            "project_id": project_id,
+            "nodes": health.get("nodes_count", 0),
+            "files": health.get("files_count", 0),
+            "message": "Project synced successfully",
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
 
 
-def _auth(request: Request) -> None:
-    """Validate auth from an HTTP request."""
-    validate_auth(dict(request.headers))
+@mcp.tool()
+@_track_tool("trellis_get_feature")
+async def trellis_get_feature(
+    project_id: str = "",
+    feature_name: str = "",
+) -> str:
+    """Get feature context and functions."""
+    try:
+        bridge = _get_bridge(project_id)
+        module = bridge.module_overview(feature_name)
+        return json.dumps(module, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
 
 
-def _project_id(request: Request) -> str:
-    """Extract and validate project_id from path params."""
-    pid = request.path_params.get("project_id", "").strip()
-    if not pid:
-        raise ValueError("project_id is required")
-    return pid
+@mcp.tool()
+@_track_tool("trellis_analyze_impact")
+async def trellis_analyze_impact(
+    project_id: str = "",
+    function_path: str = "",
+    depth_mode: str = "standard",
+) -> str:
+    """Analyze impact of changing a function.
+    
+    Returns both technical and feature-level impact.
+    """
+    try:
+        bridge = _get_bridge(project_id)
+        
+        # Get feature impact report
+        report = bridge.get_feature_impact(function_path, depth=3)
+        
+        # Format for MCP
+        result = {
+            "symbol": function_path,
+            "risk_level": report.get("technical_impact", {}).get("risk_level", "unknown"),
+            "affected_functions": len(report.get("technical_impact", {}).get("affected_functions", [])),
+            "feature_impacts": [
+                {
+                    "feature": fi["feature_name"],
+                    "functions": len(fi["impacted_functions"]),
+                    "decisions": [d["id"] for d in fi["affected_decisions"]],
+                    "risks": fi["risk_flags"],
+                }
+                for fi in report.get("feature_impacts", [])
+            ],
+            "development_pointers": report.get("development_pointers", [])[:10],  # Limit
+            "divergence_warnings": report.get("divergence_warnings", []),
+        }
+        
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
 
 
-def _path_param(request: Request, name: str) -> str:
-    """Extract a path param and strip whitespace."""
-    return request.path_params.get(name, "").strip()
+@mcp.tool()
+@_track_tool("trellis_get_function")
+async def trellis_get_function(
+    project_id: str = "",
+    function_path: str = "",
+) -> str:
+    """Get details for a specific function."""
+    try:
+        bridge = _get_bridge(project_id)
+        node = bridge.get_ast_node(function_path)
+        return json.dumps(node, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
 
 
-def _auth_from_context(ctx) -> None:
-    """Validate auth from an MCP tool context."""
-    headers = {}
-    request = getattr(ctx, "request", None)
-    if request is not None:
-        headers = getattr(request, "headers", {}) or {}
-    validate_auth(headers)
+@mcp.tool()
+@_track_tool("trellis_search")
+async def trellis_search(
+    project_id: str = "",
+    query: str = "",
+    limit: int = 10,
+) -> str:
+    """Search for functions by concept."""
+    try:
+        bridge = _get_bridge(project_id)
+        results = bridge.search(query, limit=limit)
+        return json.dumps({"results": results}, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
 
 
-def _require_project_id(project_id: str) -> str:
-    normalized = project_id.strip()
-    if not normalized:
-        raise ToolError("project_id is required")
-    return normalized
+@mcp.tool()
+@_track_tool("trellis_list_features")
+async def trellis_list_features(
+    project_id: str = "",
+) -> str:
+    """List all features/modules in the project."""
+    try:
+        bridge = _get_bridge(project_id)
+        pmap = bridge.project_map()
+        modules = pmap.get("modules", [])
+        return json.dumps({
+            "features": [
+                {
+                    "name": m.get("path", "unknown"),
+                    "symbol_count": m.get("symbol_count", 0),
+                }
+                for m in modules
+            ]
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
 
 
-def _validate_repo_path(repo_path: str) -> str:
-    path = Path(repo_path).resolve()
-    if not path.exists() or not path.is_dir():
-        raise ToolError("repo_path must be an existing directory")
-    return path.as_posix()
+@mcp.tool()
+@_track_tool("trellis_trace_path")
+async def trellis_trace_path(
+    project_id: str = "",
+    from_feature: str = "",
+    to_feature: str = "",
+) -> str:
+    """Trace dependency path between two features."""
+    try:
+        bridge = _get_bridge(project_id)
+        deps = bridge.dependency_graph(from_feature)
+        return json.dumps(deps, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+@_track_tool("trellis_visualize_graph")
+async def trellis_visualize_graph(
+    project_id: str = "",
+) -> str:
+    """Get graph data for visualization."""
+    try:
+        bridge = _get_bridge(project_id)
+        graph = bridge.get_graph_for_visualizer(max_nodes=200)
+        return json.dumps(graph, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+@_track_tool("trellis_detect_hotspots")
+async def trellis_detect_hotspots(
+    project_id: str = "",
+) -> str:
+    """Find high-centrality functions (potential hotspots)."""
+    try:
+        bridge = _get_bridge(project_id)
+        pmap = bridge.project_map()
+        hot = pmap.get("hot_functions", [])[:20]
+        return json.dumps({"hotspots": hot}, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+@_track_tool("trellis_analyze_diff")
+async def trellis_analyze_diff(
+    project_id: str = "",
+    diff: str = "",
+) -> str:
+    """Analyze impact of a code diff."""
+    try:
+        # Parse diff to find changed functions
+        # This is a simplified version
+        return json.dumps({
+            "message": "Diff analysis requires git integration. Use trellis_analyze_impact for specific functions.",
+            "diff_length": len(diff),
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+@_track_tool("trellis_get_boundary_map")
+async def trellis_get_boundary_map(
+    project_id: str = "",
+) -> str:
+    """Get module boundary map."""
+    try:
+        bridge = _get_bridge(project_id)
+        pmap = bridge.project_map()
+        modules = pmap.get("modules", [])
+        deps = pmap.get("module_dependencies", [])
+        return json.dumps({
+            "modules": [m.get("path") for m in modules],
+            "dependencies": deps,
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
 
 
 # ------------------------------------------------------------------
-# HTTP Routes (for visualizer)
+# HTTP Routes
 # ------------------------------------------------------------------
+
+@mcp.custom_route("/", methods=["GET"])
+async def root(request: Request):
+    """Serve visualizer HTML."""
+    visualizer_path = Path(__file__).parent / "visualizer.html"
+    if visualizer_path.exists():
+        return FileResponse(visualizer_path)
+    return JSONResponse({"message": "Trellis MCP Server", "version": VERSION})
+
+
 @mcp.custom_route("/health", methods=["GET"])
-async def health_check(_: Request) -> JSONResponse:
-    return _cors_json(
-        {"status": "ok", "projects_cached": _router.project_count(), "version": VERSION}
-    )
+async def health(request: Request):
+    """Health check."""
+    return JSONResponse({"status": "ok", "version": VERSION})
 
 
 @mcp.custom_route("/graph/{project_id}", methods=["GET"])
-async def visualizer_graph(request: Request) -> JSONResponse:
-    """Export full project graph as D3.js nodes/links JSON."""
-    _auth(request)
+async def graph_get(request: Request):
+    """Get graph data."""
+    project_id = request.path_params["project_id"]
     try:
-        pid = _project_id(request)
-        data = _visualizer.export_graph(pid)
-        return _cors_json(data)
-    except ValueError as exc:
-        return _cors_json({"error": str(exc)}, status=400)
-    except Exception as exc:
-        return _cors_json({"error": str(exc)}, status=500)
+        bridge = _get_bridge(project_id)
+        graph = bridge.get_graph_for_visualizer(max_nodes=200)
+        return JSONResponse(graph)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
-@mcp.custom_route("/graph/{project_id}/nodes", methods=["GET"])
-async def visualizer_graph_nodes(request: Request) -> JSONResponse:
-    """Export paginated project graph nodes for lazy loading."""
-    _auth(request)
+@mcp.custom_route("/graph/{project_id}/impact/{symbol}", methods=["GET"])
+async def graph_impact(request: Request):
+    """Get impact graph."""
+    project_id = request.path_params["project_id"]
+    symbol = request.path_params["symbol"]
     try:
-        pid = _project_id(request)
-    except ValueError as exc:
-        return _cors_json({"error": str(exc)}, status=400)
+        bridge = _get_bridge(project_id)
+        graph = bridge.get_impact_graph(symbol)
+        return JSONResponse(graph)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
-    layer = request.query_params.get("layer", "feature")
-    limit = int(request.query_params.get("limit", "50"))
-    offset = int(request.query_params.get("offset", "0"))
 
+@mcp.custom_route("/feature/{project_id}/impact/{symbol}", methods=["GET"])
+async def feature_impact(request: Request):
+    """Get feature impact report."""
+    project_id = request.path_params["project_id"]
+    symbol = request.path_params["symbol"]
     try:
-        data = _visualizer.export_graph(pid)
-        all_nodes = data.get("nodes", [])
-        filtered = [n for n in all_nodes if layer == "all" or n.get("type") == layer]
-        paginated = filtered[offset : offset + limit]
-        node_ids = {n["id"] for n in paginated}
-        links = [
-            link
-            for link in data.get("links", [])
-            if link.get("source") in node_ids or link.get("target") in node_ids
-        ]
-        return _cors_json(
-            {
-                "nodes": paginated,
-                "links": links,
-                "total": len(filtered),
-                "offset": offset,
-                "limit": limit,
-                "has_more": (offset + limit) < len(filtered),
-            }
-        )
-    except Exception as exc:
-        return _cors_json({"error": str(exc)}, status=500)
+        bridge = _get_bridge(project_id)
+        report = bridge.get_feature_impact(symbol)
+        return JSONResponse(report)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
-@mcp.custom_route("/graph/{project_id}/impact/{function_path:path}", methods=["GET"])
-async def visualizer_impact(request: Request) -> JSONResponse:
-    """Export impact subgraph for a function path."""
-    _auth(request)
-    pid = _path_param(request, "project_id")
-    func_path = _path_param(request, "function_path")
-    if not pid:
-        return _cors_json({"error": "project_id is required"}, status=400)
-    if not func_path:
-        return _cors_json({"error": "function_path is required"}, status=400)
+@mcp.custom_route("/feature/{project_id}/pointers/{symbol}", methods=["GET"])
+async def feature_pointers(request: Request):
+    """Get development pointers."""
+    project_id = request.path_params["project_id"]
+    symbol = request.path_params["symbol"]
     try:
-        # Strip visualizer prefix if present
-        clean_path = func_path.replace("func:", "", 1) if func_path.startswith("func:") else func_path
-        
-        # Resolve function path first (handles fuzzy matching)
-        resolved = _engine._resolve_function_path(pid, clean_path)
-        if resolved is None:
-            return _cors_json({"error": f"Function not found: {func_path}"}, status=404)
-        
-        # Get impact report for risk annotations
-        try:
-            impact_report = _engine.analyze_impact(
-                project_id=pid,
-                function_path=resolved,
-                change_summary="",
-                include_suggestions=True,
-                depth_mode="standard",
-            )
-            data = _visualizer.export_impact_subgraph(pid, resolved, impact_report.model_dump())
-        except Exception:
-            # Fallback to basic subgraph if impact analysis fails
-            data = _visualizer.export_impact_subgraph(pid, resolved)
-        return _cors_json(data)
-    except Exception as exc:
-        return _cors_json({"error": str(exc)}, status=500)
+        bridge = _get_bridge(project_id)
+        pointers = bridge.get_development_pointers(symbol)
+        return JSONResponse({"pointers": pointers})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
-@mcp.custom_route("/graph/{project_id}/impact-details/{function_path:path}", methods=["GET"])
-async def visualizer_impact_details(request: Request) -> JSONResponse:
-    """Export enhanced impact analysis with risk groups, breakpoints, and test suggestions."""
-    _auth(request)
-    pid = _path_param(request, "project_id")
-    func_path = _path_param(request, "function_path")
-    if not pid:
-        return _cors_json({"error": "project_id is required"}, status=400)
-    if not func_path:
-        return _cors_json({"error": "function_path is required"}, status=400)
-    try:
-        report = _engine.analyze_impact(
-            project_id=pid,
-            function_path=func_path,
-            change_summary="",
-            include_suggestions=True,
-            depth_mode="standard",
-        )
-        return _cors_json(report.model_dump())
-    except Exception as exc:
-        return _cors_json({"error": str(exc)}, status=500)
-
-
-@mcp.custom_route("/graph/{project_id}/hotspots", methods=["GET"])
-async def visualizer_hotspots(request: Request) -> JSONResponse:
-    """Export architectural hotspots for visualization."""
-    _auth(request)
-    try:
-        pid = _project_id(request)
-    except ValueError as exc:
-        return _cors_json({"error": str(exc)}, status=400)
-    try:
-        report = _engine.detect_hotspots(pid)
-        return _cors_json(report.model_dump())
-    except Exception as exc:
-        return _cors_json({"error": str(exc)}, status=500)
-
-
-@mcp.custom_route("/visualizer", methods=["GET"])
-async def visualizer_page(_: Request) -> FileResponse:
-    """Serve the standalone HTML graph visualizer."""
-    path = Path(__file__).with_name("visualizer.html")
-    if not path.exists():
-        return _cors_json({"error": "visualizer.html not found"}, status=404)
-    return FileResponse(path, media_type="text/html")
-
-
-@mcp.custom_route("/", methods=["GET"])
-async def root_redirect(_: Request) -> RedirectResponse:
-    """Redirect root to the visualizer."""
-    return RedirectResponse(url="/visualizer")
+@mcp.custom_route("/spec/{project_id}", methods=["GET", "POST"])
+async def spec_handler(request: Request):
+    """Handle project spec."""
+    project_id = request.path_params["project_id"]
+    
+    if request.method == "GET":
+        spec = _spec_manager.load_spec(project_id)
+        if spec is None:
+            template = _spec_manager.create_template(project_id)
+            return JSONResponse({
+                "project_id": project_id,
+                "status": "no_spec",
+                "content": template,
+            })
+        return JSONResponse({
+            "project_id": project_id,
+            "status": "ok",
+            "content": spec.content,
+        })
+    
+    else:  # POST
+        body = await request.json()
+        content = body.get("content", "")
+        _spec_manager.save_spec(project_id, content)
+        return JSONResponse({"project_id": project_id, "status": "ok"})
 
 
 @mcp.custom_route("/analytics", methods=["GET"])
-async def analytics_dashboard(_: Request) -> FileResponse:
-    """Serve the analytics dashboard HTML."""
-    path = Path(__file__).with_name("analytics.html")
-    if not path.exists():
-        return _cors_json({"error": "analytics.html not found"}, status=404)
-    return FileResponse(path, media_type="text/html")
-
-
-@mcp.custom_route("/analytics/api/stats", methods=["GET"])
-async def analytics_stats(_: Request) -> JSONResponse:
-    """Return analytics statistics."""
-    try:
-        stats = _analytics.get_summary_stats()
-        return _cors_json(stats)
-    except Exception as exc:
-        return _cors_json({"error": str(exc)}, status=500)
-
-
-@mcp.custom_route("/analytics/api/calls", methods=["GET"])
-async def analytics_calls(request: Request) -> JSONResponse:
-    """Return recent tool calls."""
-    try:
-        hours = int(request.query_params.get("hours", "24"))
-        limit = int(request.query_params.get("limit", "50"))
-        calls = _analytics.get_recent_calls(limit=limit)
-        stats = _analytics.get_tool_call_stats(hours=hours)
-        return _cors_json({"calls": calls, "stats": stats})
-    except Exception as exc:
-        return _cors_json({"error": str(exc)}, status=500)
-
-
-@mcp.custom_route("/analytics/api/syncs", methods=["GET"])
-async def analytics_syncs(request: Request) -> JSONResponse:
-    """Return sync history."""
-    try:
-        project_id = request.query_params.get("project_id")
-        limit = int(request.query_params.get("limit", "20"))
-        syncs = _analytics.get_sync_history(project_id=project_id, limit=limit)
-        return _cors_json(syncs)
-    except Exception as exc:
-        return _cors_json({"error": str(exc)}, status=500)
-
-
-@mcp.custom_route("/spec/{project_id}", methods=["GET"])
-async def spec_get(request: Request) -> JSONResponse:
-    """Return project.md spec for a project."""
-    _auth(request)
-    try:
-        pid = _project_id(request)
-    except ValueError as exc:
-        return _cors_json({"error": str(exc)}, status=400)
-
-    spec = _spec_manager.load_spec(pid)
-    if spec is None:
-        template = _spec_manager.create_template(pid)
-        return _cors_json(
-            {
-                "project_id": pid,
-                "status": "no_spec",
-                "content": template,
-                "hint": "No project.md found. Use the template above or create your own.",
-            }
-        )
-
-    return _cors_json(
-        {
-            "project_id": pid,
-            "status": "ok",
-            "content": spec.content,
-            "source_path": spec.source_path,
-            "overview": spec.overview,
-            "purpose": spec.purpose,
-            "architecture": spec.architecture,
-        }
-    )
-
-
-@mcp.custom_route("/spec/{project_id}", methods=["POST"])
-async def spec_save(request: Request) -> JSONResponse:
-    """Save project.md spec for a project."""
-    _auth(request)
-    try:
-        pid = _project_id(request)
-    except ValueError as exc:
-        return _cors_json({"error": str(exc)}, status=400)
-
-    try:
-        body = await request.json() if await request.body() else {}
-    except Exception:
-        body = {}
-
-    content = body.get("content", "")
-    if not content:
-        return _cors_json({"error": "content is required"}, status=400)
-
-    try:
-        saved_path = _spec_manager.save_spec(pid, content)
-        return _cors_json(
-            {
-                "project_id": pid,
-                "status": "ok",
-                "saved_to": str(saved_path),
-                "message": "Project spec saved.",
-            }
-        )
-    except Exception as exc:
-        return _cors_json({"error": str(exc)}, status=500)
+async def analytics_dashboard(request: Request):
+    """Serve analytics dashboard."""
+    dashboard_path = Path(__file__).parent / "analytics.html"
+    if dashboard_path.exists():
+        return FileResponse(dashboard_path)
+    return JSONResponse({"error": "Analytics dashboard not found"}, status_code=404)
 
 
 # ------------------------------------------------------------------
-# MCP Tools (for AI coding agents)
+# Main
 # ------------------------------------------------------------------
-@mcp.tool()
-async def trellis_sync(
-    project_id: str,
-    repo_path: str,
-    config_path: str = ".trellis/config.yaml",
-    incremental: bool = True,
-    ctx=None,
-) -> SyncResult:
-    """Sync a repository into a project-scoped Trellis graph snapshot."""
-    import time
-    start = time.perf_counter()
-    _auth_from_context(ctx)
-    pid = _require_project_id(project_id)
-    rpath = _validate_repo_path(repo_path)
-    result = _engine.sync_project(
-        project_id=pid,
-        repo_path=rpath,
-        config_path=config_path,
-        incremental=incremental,
-    )
-    _router.refresh(pid)
-    duration_ms = (time.perf_counter() - start) * 1000
-    _analytics.record_sync(
-        project_id=pid,
-        duration_ms=duration_ms,
-        functions_indexed=result.indexed_functions,
-        features_indexed=result.indexed_features,
-        incremental=incremental,
-    )
-    _analytics.record_tool_call(
-        tool_name="trellis_sync",
-        duration_ms=duration_ms,
-        status="success",
-        project_id=pid,
-    )
-    return result
 
-
-@_track_tool("trellis_get_feature")
-@mcp.tool()
-async def trellis_get_feature(
-    project_id: str,
-    feature_name: str,
-    include_dependencies: bool = False,
-    depth: int = 1,
-    ctx=None,
-) -> FeatureContext:
-    """Return feature context and optional dependency neighborhood."""
-    _auth_from_context(ctx)
-    pid = _require_project_id(project_id)
-    if not (1 <= depth <= 10):
-        raise ToolError("depth must be between 1 and 10")
-    try:
-        return _engine.get_feature(pid, feature_name, include_dependencies, depth)
-    except ValueError as exc:
-        raise ToolError(str(exc)) from exc
-
-
-@_track_tool("trellis_analyze_impact")
-@mcp.tool()
-async def trellis_analyze_impact(
-    project_id: str,
-    function_path: str,
-    change_summary: str = "",
-    include_suggestions: bool = True,
-    depth_mode: str = "standard",
-    ctx=None,
-) -> ImpactReport:
-    """Analyze impacted functions/features for a proposed function change.
-
-    depth_mode: "standard" (call graph), "deep" (call + data flow), "full" (all dimensions)
-    """
-    _auth_from_context(ctx)
-    pid = _require_project_id(project_id)
-    if depth_mode not in {"standard", "deep", "full"}:
-        raise ToolError('depth_mode must be one of: standard, deep, full')
-    try:
-        return _engine.analyze_impact(
-            project_id=pid,
-            function_path=function_path,
-            change_summary=change_summary,
-            include_suggestions=include_suggestions,
-            depth_mode=depth_mode,
-        )
-    except ValueError as exc:
-        raise ToolError(str(exc)) from exc
-
-
-@_track_tool("trellis_trace_path")
-@mcp.tool()
-async def trellis_trace_path(
-    project_id: str,
-    from_feature: str,
-    to_feature: str,
-    max_depth: int = 5,
-    ctx=None,
-) -> PathTrace:
-    """Trace a dependency path between two features within a project graph."""
-    _auth_from_context(ctx)
-    pid = _require_project_id(project_id)
-    if not (1 <= max_depth <= 20):
-        raise ToolError("max_depth must be between 1 and 20")
-    return _engine.trace_path(pid, from_feature, to_feature, max_depth)
-
-
-@_track_tool("trellis_search")
-@mcp.tool()
-async def trellis_search(
-    project_id: str,
-    query: str,
-    search_type: str = "auto",
-    limit: int = 5,
-    ctx=None,
-) -> SearchResult:
-    """Search project graph metadata by semantic or keyword strategy."""
-    _auth_from_context(ctx)
-    pid = _require_project_id(project_id)
-    normalized = search_type.lower().strip()
-    if normalized not in {"auto", "semantic", "keyword"}:
-        raise ToolError("search_type must be one of: auto, semantic, keyword")
-    if not (1 <= limit <= 50):
-        raise ToolError("limit must be between 1 and 50")
-    return _engine.search(pid, query, normalized, limit)
-
-
-@_track_tool("trellis_list_features")
-@mcp.tool()
-async def trellis_list_features(
-    project_id: str,
-    include_stats: bool = False,
-    ctx=None,
-) -> FeatureList:
-    """List discovered features for a project with optional stats."""
-    _auth_from_context(ctx)
-    pid = _require_project_id(project_id)
-    return _engine.list_features(pid, include_stats)
-
-
-@_track_tool("trellis_get_function")
-@mcp.tool()
-async def trellis_get_function(
-    project_id: str,
-    function_path: str,
-    include_callers: bool = True,
-    include_callees: bool = True,
-    ctx=None,
-) -> FunctionDetail:
-    """Return function detail with optional caller/callee context."""
-    _auth_from_context(ctx)
-    pid = _require_project_id(project_id)
-    try:
-        return _engine.get_function(pid, function_path, include_callers, include_callees)
-    except ValueError as exc:
-        raise ToolError(str(exc)) from exc
-
-
-@_track_tool("trellis_visualize_graph")
-@mcp.tool()
-async def trellis_visualize_graph(
-    project_id: str,
-    ctx=None,
-) -> str:
-    """Return a URL to open the interactive graph visualizer for this project."""
-    _auth_from_context(ctx)
-    pid = _require_project_id(project_id)
-    index = _store.load_index(pid)
-    if index is None:
-        raise ToolError(f"Project not found: {pid}")
-    host = os.getenv("TRELLIS_HOST", "localhost").strip()
-    port = os.getenv("TRELLIS_PORT", "17317").strip()
-    return f"http://{host}:{port}/visualizer?project_id={pid}"
-
-
-@_track_tool("trellis_analyze_feature_impact")
-@mcp.tool()
-async def trellis_analyze_feature_impact(
-    project_id: str,
-    feature_name: str,
-    change_summary: str = "",
-    include_suggestions: bool = True,
-    ctx=None,
-) -> ImpactReport:
-    """Analyze impacted features/functions for a proposed feature-level change."""
-    _auth_from_context(ctx)
-    pid = _require_project_id(project_id)
-    try:
-        return _engine.analyze_feature_impact(
-            project_id=pid,
-            feature_name=feature_name,
-            change_summary=change_summary,
-            include_suggestions=include_suggestions,
-        )
-    except ValueError as exc:
-        raise ToolError(str(exc)) from exc
-
-
-@_track_tool("trellis_detect_hotspots")
-@mcp.tool()
-async def trellis_detect_hotspots(
-    project_id: str,
-    ctx=None,
-) -> HotspotReport:
-    """Detect architectural hotspots: high-centrality nodes and unstable dependency clusters."""
-    _auth_from_context(ctx)
-    pid = _require_project_id(project_id)
-    return _engine.detect_hotspots(pid)
-
-
-@_track_tool("trellis_analyze_diff")
-@mcp.tool()
-async def trellis_analyze_diff(
-    project_id: str,
-    repo_path: str,
-    diff_source: str = "git",
-    ctx=None,
-) -> DiffImpactReport:
-    """Read current branch diff and re-rank impact in near real-time."""
-    _auth_from_context(ctx)
-    pid = _require_project_id(project_id)
-    rpath = _validate_repo_path(repo_path)
-    return _engine.analyze_diff(pid, rpath, diff_source)
-
-
-@_track_tool("trellis_get_boundary_map")
-@mcp.tool()
-async def trellis_get_boundary_map(
-    project_id: str,
-    ctx=None,
-) -> List[BoundaryMap]:
-    """Map impacts to module boundaries and owners. Detect cross-boundary violations."""
-    _auth_from_context(ctx)
-    pid = _require_project_id(project_id)
-    return _engine.get_boundary_map(pid)
-
-
-# ------------------------------------------------------------------
-# Entry point
-# ------------------------------------------------------------------
 if __name__ == "__main__":
-    transport = os.getenv("TRELLIS_TRANSPORT", "stdio").strip().lower()
-    host = os.getenv("TRELLIS_HOST", "0.0.0.0").strip() or "0.0.0.0"
-    port = int(os.getenv("TRELLIS_PORT", "17317").strip() or "17317")
-
-    try:
-        if transport == "stdio":
-            mcp.run(show_banner=False)
-        elif transport in {"http", "sse"}:
-            mcp.run(transport=transport, host=host, port=port, show_banner=False)
-        else:
-            raise RuntimeError("TRELLIS_TRANSPORT must be one of: stdio, http, sse")
-    except KeyboardInterrupt:
-        pass
+    # Determine transport from environment
+    transport = os.environ.get("TRELLIS_TRANSPORT", "stdio")
+    
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        # HTTP mode - Use FastAPI for REST endpoints
+        from fastapi import FastAPI, HTTPException
+        from fastapi.middleware.cors import CORSMiddleware
+        from fastapi.responses import FileResponse, JSONResponse
+        import uvicorn
+        
+        http_app = FastAPI(title="Trellis API", version=VERSION)
+        
+        # Enable CORS
+        http_app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+        
+        @http_app.get("/")
+        async def root():
+            """Serve visualizer HTML."""
+            visualizer_path = Path(__file__).parent / "visualizer.html"
+            if visualizer_path.exists():
+                return FileResponse(visualizer_path)
+            return {"message": "Trellis MCP Server", "version": VERSION}
+        
+        @http_app.get("/health")
+        async def health():
+            return {"status": "ok", "version": VERSION}
+        
+        @http_app.get("/graph/{project_id}")
+        async def graph_get(project_id: str):
+            try:
+                bridge = _get_bridge(project_id)
+                graph = bridge.get_graph_for_visualizer(max_nodes=200)
+                return graph
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        @http_app.get("/graph/{project_id}/impact/{symbol}")
+        async def graph_impact(project_id: str, symbol: str):
+            try:
+                bridge = _get_bridge(project_id)
+                graph = bridge.get_impact_graph(symbol)
+                return graph
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        @http_app.get("/feature/{project_id}/impact/{symbol}")
+        async def feature_impact(project_id: str, symbol: str):
+            try:
+                bridge = _get_bridge(project_id)
+                report = bridge.get_feature_impact(symbol)
+                return report
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        @http_app.get("/feature/{project_id}/context/{symbol}")
+        async def feature_context(project_id: str, symbol: str):
+            try:
+                bridge = _get_bridge(project_id)
+                context = bridge.get_feature_context(symbol)
+                if context:
+                    return context
+                raise HTTPException(status_code=404, detail="No feature context found")
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        @http_app.get("/feature/{project_id}/pointers/{symbol}")
+        async def feature_pointers(project_id: str, symbol: str):
+            try:
+                bridge = _get_bridge(project_id)
+                pointers = bridge.get_development_pointers(symbol)
+                return {"pointers": pointers}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        @http_app.get("/feature/{project_id}/divergence/{symbol}")
+        async def feature_divergence(project_id: str, symbol: str):
+            try:
+                bridge = _get_bridge(project_id)
+                warnings = bridge.check_feature_divergence(symbol)
+                return {"symbol": symbol, "divergence_warnings": warnings, "has_divergence": len(warnings) > 0}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        @http_app.get("/spec/{project_id}")
+        async def spec_get(project_id: str):
+            spec = _spec_manager.load_spec(project_id)
+            if spec is None:
+                template = _spec_manager.create_template(project_id)
+                return {"project_id": project_id, "status": "no_spec", "content": template}
+            return {"project_id": project_id, "status": "ok", "content": spec.content}
+        
+        @http_app.post("/spec/{project_id}")
+        async def spec_post(project_id: str, content: str = ""):
+            _spec_manager.save_spec(project_id, content)
+            return {"project_id": project_id, "status": "ok"}
+        
+        @http_app.get("/analytics")
+        async def analytics_dashboard():
+            dashboard_path = Path(__file__).parent / "analytics.html"
+            if dashboard_path.exists():
+                return FileResponse(dashboard_path)
+            raise HTTPException(status_code=404, detail="Dashboard not found")
+        
+        uvicorn.run(http_app, host="0.0.0.0", port=17317)

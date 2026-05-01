@@ -6,7 +6,10 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from models import utc_now_iso
+from datetime import datetime, timezone
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 class ProjectSpec:
