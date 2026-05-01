@@ -42,12 +42,30 @@
 - [x] Divergence detection from feature specs
 - [x] Feature impact API endpoints
 
+### MCP Server Integration
+- [x] server.py rewritten for code-graph-mcp bridge
+- [x] All 10 MCP tools working:
+  - trellis_sync, trellis_search, trellis_list_features
+  - trellis_analyze_impact (with feature context)
+  - trellis_get_function, trellis_trace_path
+  - trellis_visualize_graph, trellis_detect_hotspots
+  - trellis_analyze_diff, trellis_get_boundary_map
+- [x] HTTP endpoints with FastAPI:
+  - GET /health, GET /graph/{project_id}
+  - GET /graph/{project_id}/impact/{symbol}
+  - GET /feature/{project_id}/impact/{symbol}
+  - GET /feature/{project_id}/pointers/{symbol}
+  - GET /feature/{project_id}/divergence/{symbol}
+  - GET /spec/{project_id}, POST /spec/{project_id}
+  - GET /analytics
+- [x] Project path resolution (trellis → actual path)
+- [x] Analytics tracking for all tools
+
 ### Testing
 - [x] test_bridge_smoke.py - Import and binary detection
-- [x] test_bridge_e2e.py - End-to-end with indexing
-- [x] test_bridge_queries.py - Specific query tests
-- [x] test_visualizer_api.py - Visualizer data format
-- [x] test_view_modes.py - Size-based view testing
+- [x] test_mcp_integration.py - MCP tools test
+- [x] test_http_integration.py - HTTP endpoints test
+- [x] test_full_integration.py - Comprehensive integration test
 - [x] test_feature_impact.py - Feature parsing
 - [x] test_feature_api.py - Feature impact API
 
@@ -81,6 +99,10 @@ trellis/
 - Search returns symbol matches
 - Project map returns architecture
 - Visualizer API formats data correctly
+- **MCP server integrates with bridge** (10 tools)
+- **HTTP endpoints serve correct data** (FastAPI)
+- **Feature impact returns development pointers**
+- **Project path resolution works** (trellis → actual path)
 
 **Limitations:**
 - Visualizer HTML still points to old endpoints (needs update)
@@ -92,31 +114,18 @@ trellis/
 ### Immediate (This Week)
 1. [ ] Update visualizer.html to use new API endpoints
 2. [ ] Test visualizer with real data
-3. [ ] Port spec_manager to use bridge
-4. [ ] Add project.md validation feature
-
-### Feature Impact Layer (Completed)
-5. [x] ProjectContextParser - Parse project.md into structured features
-6. [x] FeatureImpactAnalyzer - Combine technical + feature impact
-7. [x] Feature impact endpoints:
-   - GET /feature/{project_id}/impact/{symbol}
-   - GET /feature/{project_id}/context/{symbol}
-   - GET /feature/{project_id}/pointers/{symbol}
-   - GET /feature/{project_id}/divergence/{symbol}
-8. [x] Development pointers for coding agents
-9. [x] Divergence detection from feature specs
+3. [ ] Test with large codebase (OmniDoc)
 
 ### Short Term (Next 2 Weeks)
-10. [ ] Implement PR analyzer workflow
-11. [ ] Add team coordination features
-12. [ ] Create analytics dashboard for bridge usage
-13. [ ] Test with large codebase (OmniDoc)
+4. [ ] Implement PR analyzer workflow
+5. [ ] Add team coordination features
+6. [ ] Create analytics dashboard for bridge usage
+7. [ ] Package for pip install
 
 ### Long Term
-14. [ ] Build web dashboard for team workflows
-15. [ ] Add Python tooling integrations (pytest, mypy)
-16. [ ] Package for pip install
-17. [ ] Write comprehensive documentation
+8. [ ] Build web dashboard for team workflows
+9. [ ] Add Python tooling integrations (pytest, mypy)
+10. [ ] Write comprehensive documentation
 
 ## Performance
 
