@@ -25,6 +25,12 @@ from spec_manager import SpecManager
 # Load environment variables from .env file
 load_dotenv(Path(__file__).with_name(".env"))
 
+# Ensure banner is suppressed via env var
+if os.environ.get("FASTMCP_SHOW_SERVER_BANNER") is None:
+    os.environ["FASTMCP_SHOW_SERVER_BANNER"] = "false"
+if os.environ.get("FASTMCP_LOG_LEVEL") is None:
+    os.environ["FASTMCP_LOG_LEVEL"] = "ERROR"
+
 VERSION = "0.2.0"
 
 mcp = FastMCP(
@@ -171,8 +177,9 @@ async def trellis_analyze_impact(
         # Format for MCP
         result = {
             "symbol": function_path,
-            "risk_level": report.get("technical_impact", {}).get("risk_level", "unknown"),
-            "affected_functions": len(report.get("technical_impact", {}).get("affected_functions", [])),
+            "risk_level": report.get("risk_level", "unknown"),
+            "affected_functions": report.get("affected_functions_count", 0),
+            "affected_files": report.get("affected_files_count", 0),
             "feature_impacts": [
                 {
                     "feature": fi["feature_name"],
@@ -328,6 +335,145 @@ async def trellis_get_boundary_map(
 
 
 # ------------------------------------------------------------------
+# Knowledge Graph Tools (Obsidian-like)
+# ------------------------------------------------------------------
+
+@mcp.tool()
+@_track_tool("trellis_create_note")
+async def trellis_create_note(
+    project_id: str = "",
+    note_id: str = "",
+    title: str = "",
+    content: str = "",
+    tags: str = "",
+) -> str:
+    """Create or update a knowledge note.
+    
+    Notes support markdown with [[links]] and @mentions.
+    """
+    try:
+        from src.trellis.knowledge_graph import NoteGraph
+        
+        resolved = _resolve_project_path(project_id)
+        graph = NoteGraph(resolved)
+        
+        tag_list = [t.strip() for t in tags.split(",")] if tags else []
+        note = graph.save_note(note_id, content, title=title, tags=tag_list)
+        
+        return json.dumps({
+            "status": "ok",
+            "note_id": note.id,
+            "title": note.title,
+            "links": note.links,
+            "mentions": note.mentions,
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+@_track_tool("trellis_get_note")
+async def trellis_get_note(
+    project_id: str = "",
+    note_id: str = "",
+) -> str:
+    """Get a knowledge note by ID."""
+    try:
+        from src.trellis.knowledge_graph import NoteGraph
+        
+        resolved = _resolve_project_path(project_id)
+        graph = NoteGraph(resolved)
+        note = graph.get_note(note_id)
+        
+        if not note:
+            return json.dumps({"error": f"Note '{note_id}' not found"}, indent=2)
+        
+        return json.dumps({
+            "id": note.id,
+            "title": note.title,
+            "content": note.content,
+            "tags": note.tags,
+            "links": note.links,
+            "mentions": note.mentions,
+            "backlinks": graph.get_backlinks(note_id),
+            "created": note.created_at,
+            "updated": note.updated_at,
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+@_track_tool("trellis_search_notes")
+async def trellis_search_notes(
+    project_id: str = "",
+    query: str = "",
+) -> str:
+    """Search knowledge notes by content."""
+    try:
+        from src.trellis.knowledge_graph import NoteGraph
+        
+        resolved = _resolve_project_path(project_id)
+        graph = NoteGraph(resolved)
+        results = graph.search_notes(query)
+        
+        return json.dumps({
+            "query": query,
+            "results": [
+                {
+                    "id": n.id,
+                    "title": n.title,
+                    "excerpt": n.content[:200] + "..." if len(n.content) > 200 else n.content,
+                    "tags": n.tags,
+                }
+                for n in results
+            ]
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+@_track_tool("trellis_delete_note")
+async def trellis_delete_note(
+    project_id: str = "",
+    note_id: str = "",
+) -> str:
+    """Delete a knowledge note."""
+    try:
+        from src.trellis.knowledge_graph import NoteGraph
+        
+        resolved = _resolve_project_path(project_id)
+        graph = NoteGraph(resolved)
+        success = graph.delete_note(note_id)
+        
+        return json.dumps({
+            "status": "ok" if success else "error",
+            "message": f"Note '{note_id}' deleted" if success else f"Note '{note_id}' not found",
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+@_track_tool("trellis_knowledge_graph")
+async def trellis_knowledge_graph(
+    project_id: str = "",
+) -> str:
+    """Get the full knowledge graph (notes + code nodes + edges)."""
+    try:
+        from src.trellis.knowledge_graph import NoteGraph
+        
+        resolved = _resolve_project_path(project_id)
+        graph = NoteGraph(resolved)
+        data = graph.build_graph(include_code=True)
+        
+        return json.dumps(data, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+# ------------------------------------------------------------------
 # HTTP Routes
 # ------------------------------------------------------------------
 
@@ -352,7 +498,7 @@ async def graph_get(request: Request):
     project_id = request.path_params["project_id"]
     try:
         bridge = _get_bridge(project_id)
-        graph = bridge.get_graph_for_visualizer(max_nodes=200)
+        graph = bridge.get_graph_for_visualizer()
         return JSONResponse(graph)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -431,6 +577,82 @@ async def analytics_dashboard(request: Request):
     if dashboard_path.exists():
         return FileResponse(dashboard_path)
     return JSONResponse({"error": "Analytics dashboard not found"}, status_code=404)
+
+
+@mcp.custom_route("/knowledge-graph/{project_id}", methods=["GET"])
+async def knowledge_graph_get(request: Request):
+    """Get knowledge graph data (notes + code)."""
+    project_id = request.path_params["project_id"]
+    try:
+        from src.trellis.knowledge_graph import NoteGraph
+        resolved = _resolve_project_path(project_id)
+        graph = NoteGraph(resolved)
+        data = graph.build_graph(include_code=True)
+        return JSONResponse(data)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/note/{project_id}/{note_id}", methods=["GET", "POST", "DELETE"])
+async def note_handler(request: Request):
+    """Get, save, or delete a knowledge note."""
+    project_id = request.path_params["project_id"]
+    note_id = request.path_params["note_id"]
+    
+    try:
+        from src.trellis.knowledge_graph import NoteGraph
+        resolved = _resolve_project_path(project_id)
+        graph = NoteGraph(resolved)
+        
+        if request.method == "GET":
+            note = graph.get_note(note_id)
+            if not note:
+                return JSONResponse({"error": f"Note '{note_id}' not found"}, status_code=404)
+            return JSONResponse({
+                "id": note.id,
+                "title": note.title,
+                "content": note.content,
+                "tags": note.tags,
+                "links": note.links,
+                "mentions": note.mentions,
+                "backlinks": graph.get_backlinks(note_id),
+            })
+        elif request.method == "POST":
+            body = await request.json()
+            content = body.get("content", "")
+            title = body.get("title", note_id)
+            tags = body.get("tags", [])
+            note = graph.save_note(note_id, content, title=title, tags=tags)
+            return JSONResponse({"status": "ok", "note_id": note.id, "title": note.title})
+        elif request.method == "DELETE":
+            success = graph.delete_note(note_id)
+            if not success:
+                return JSONResponse({"error": f"Note '{note_id}' not found"}, status_code=404)
+            return JSONResponse({"status": "ok", "message": f"Note '{note_id}' deleted"})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/notes/{project_id}", methods=["GET"])
+async def notes_list(request: Request):
+    """List all knowledge notes."""
+    project_id = request.path_params["project_id"]
+    try:
+        from src.trellis.knowledge_graph import NoteGraph
+        resolved = _resolve_project_path(project_id)
+        graph = NoteGraph(resolved)
+        notes = [
+            {
+                "id": n.id,
+                "title": n.title,
+                "tags": n.tags,
+                "updated": n.updated_at,
+            }
+            for n in graph.notes.values()
+        ]
+        return JSONResponse({"notes": notes, "count": len(notes)})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 # ------------------------------------------------------------------
@@ -548,5 +770,115 @@ if __name__ == "__main__":
             if dashboard_path.exists():
                 return FileResponse(dashboard_path)
             raise HTTPException(status_code=404, detail="Dashboard not found")
+        
+        @http_app.get("/knowledge-graph/{project_id}")
+        async def knowledge_graph_get(project_id: str):
+            try:
+                from src.trellis.knowledge_graph import NoteGraph
+                resolved = _resolve_project_path(project_id)
+                graph = NoteGraph(resolved)
+                data = graph.build_graph(include_code=True)
+                return data
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        @http_app.get("/note/{project_id}/{note_id}")
+        async def note_get(project_id: str, note_id: str):
+            try:
+                from src.trellis.knowledge_graph import NoteGraph
+                resolved = _resolve_project_path(project_id)
+                graph = NoteGraph(resolved)
+                note = graph.get_note(note_id)
+                if not note:
+                    raise HTTPException(status_code=404, detail=f"Note '{note_id}' not found")
+                return {
+                    "id": note.id,
+                    "title": note.title,
+                    "content": note.content,
+                    "tags": note.tags,
+                    "links": note.links,
+                    "mentions": note.mentions,
+                    "backlinks": graph.get_backlinks(note_id),
+                }
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        @http_app.post("/note/{project_id}/{note_id}")
+        async def note_post(project_id: str, note_id: str, body: dict):
+            try:
+                from src.trellis.knowledge_graph import NoteGraph
+                resolved = _resolve_project_path(project_id)
+                graph = NoteGraph(resolved)
+                content = body.get("content", "")
+                title = body.get("title", note_id)
+                tags = body.get("tags", [])
+                note = graph.save_note(note_id, content, title=title, tags=tags)
+                return {"status": "ok", "note_id": note.id, "title": note.title}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        @http_app.delete("/note/{project_id}/{note_id}")
+        async def note_delete(project_id: str, note_id: str):
+            try:
+                from src.trellis.knowledge_graph import NoteGraph
+                resolved = _resolve_project_path(project_id)
+                graph = NoteGraph(resolved)
+                success = graph.delete_note(note_id)
+                if not success:
+                    raise HTTPException(status_code=404, detail=f"Note '{note_id}' not found")
+                return {"status": "ok", "message": f"Note '{note_id}' deleted"}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        @http_app.get("/notes/{project_id}")
+        async def notes_list(project_id: str):
+            try:
+                from src.trellis.knowledge_graph import NoteGraph
+                resolved = _resolve_project_path(project_id)
+                graph = NoteGraph(resolved)
+                notes = [
+                    {
+                        "id": n.id,
+                        "title": n.title,
+                        "tags": n.tags,
+                        "updated": n.updated_at,
+                    }
+                    for n in graph.notes.values()
+                ]
+                return {"notes": notes, "count": len(notes)}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+        
+        @http_app.get("/projects")
+        async def list_projects():
+            """List available projects with graph data."""
+            import os
+            projects = []
+            
+            # Current directory (trellis itself)
+            current = Path(__file__).parent
+            if (current / ".code-graph").exists() or (current / ".trellis").exists():
+                projects.append({
+                    "id": "trellis",
+                    "name": "Trellis",
+                    "path": str(current),
+                })
+            
+            # Parent directory - scan for subdirectories with .code-graph or .trellis
+            parent = current.parent
+            if parent.exists():
+                for item in parent.iterdir():
+                    if item.is_dir() and item.name != current.name:
+                        has_graph = (item / ".code-graph").exists() or (item / ".trellis").exists()
+                        # Also check for common project indicators
+                        is_project = has_graph or (item / ".git").exists() or (item / "src").exists()
+                        if is_project:
+                            projects.append({
+                                "id": item.name,
+                                "name": item.name,
+                                "path": str(item),
+                            })
+            
+            return {"projects": projects}
         
         uvicorn.run(http_app, host="0.0.0.0", port=17317)

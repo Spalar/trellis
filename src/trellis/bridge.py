@@ -190,7 +190,7 @@ class CodeGraphBridge:
     
     def analyze_impact(self, symbol: str, depth: int = 3) -> Dict[str, Any]:
         """Analyze impact of changing a symbol."""
-        result = self._call("impact_analysis", symbol=symbol, depth=depth)
+        result = self._call("impact_analysis", symbol_name=symbol, depth=depth)
         return self._normalize_result(result)
     
     def search(self, query: str, language: str = None, limit: int = 10) -> List[Dict[str, Any]]:
@@ -215,7 +215,7 @@ class CodeGraphBridge:
         """Get call graph for a symbol."""
         result = self._call(
             "get_call_graph",
-            symbol=symbol,
+            symbol_name=symbol,
             direction=direction,
             depth=depth,
         )
@@ -225,7 +225,7 @@ class CodeGraphBridge:
         """Get detailed info about a symbol."""
         result = self._call(
             "get_ast_node",
-            symbol=symbol,
+            symbol_name=symbol,
             include_source=include_source,
         )
         return self._normalize_result(result)
@@ -234,7 +234,7 @@ class CodeGraphBridge:
         """Find all references to a symbol."""
         result = self._call(
             "find_references",
-            symbol=symbol,
+            symbol_name=symbol,
             include_tests=include_tests,
         )
         if isinstance(result, list):
@@ -285,30 +285,21 @@ class CodeGraphBridge:
     # Visualizer API (converts to our format)
     # ------------------------------------------------------------------
     
-    def get_graph_for_visualizer(self, max_nodes: int = 200) -> Dict[str, Any]:
+    def get_graph_for_visualizer(self, max_nodes: int = 2000) -> Dict[str, Any]:
         """Get graph data formatted for the visualizer.
         
-        Returns nodes and links in our visualizer format.
-        Uses simplified view if >200 functions.
-        
-        Returns:
-            {
-                "nodes": [{"id": "...", "type": "feature|function", ...}],
-                "links": [{"source": "...", "target": "..."}],
-                "stats": {...},
-                "view_mode": "full|simplified"
-            }
+        Returns ALL functions for the project (up to max_nodes).
+        Queries SQLite directly for performance.
         """
-        health = self.health_check()
-        total_nodes = health.get("nodes_count", 0)
-        
-        if total_nodes > max_nodes:
-            return self._get_simplified_graph(health)
-        else:
-            return self._get_full_graph()
+        return self._get_full_graph()
     
     def _get_full_graph(self) -> Dict[str, Any]:
-        """Get full detailed graph for small repos."""
+        """Get full detailed graph for small repos.
+        
+        Queries SQLite directly to bypass MCP token limits.
+        """
+        import sqlite3
+        
         # Get project map for structure
         pmap = self.project_map()
         
@@ -321,39 +312,87 @@ class CodeGraphBridge:
             mod_path = mod.get("path", "")
             nodes.append({
                 "id": f"mod:{mod_path}",
-                "type": "feature",
+                "type": "module",
                 "label": mod_path,
                 "name": mod_path,
             })
         
-        # Search for all functions
-        all_funcs = self.search("*", limit=1000)
+        # Query SQLite directly for all functions (bypasses MCP token limits)
+        db_path = self.project_path / ".code-graph" / "index.db"
+        all_funcs = []
+        if db_path.exists():
+            try:
+                conn = sqlite3.connect(str(db_path))
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT n.name, n.qualified_name, f.path, n.start_line, n.end_line, n.type, n.signature
+                    FROM nodes n
+                    JOIN files f ON n.file_id = f.id
+                    WHERE n.type IN ('function', 'method')
+                      AND n.name NOT LIKE 'test_%'
+                      AND n.name != '__init__'
+                      AND n.name != '<module>'
+                    ORDER BY f.path, n.start_line
+                """)
+                all_funcs = [
+                    {
+                        "name": row[0],
+                        "qualified_name": row[1] or row[0],
+                        "file_path": row[2],
+                        "start_line": row[3],
+                        "end_line": row[4],
+                        "type": row[5],
+                        "signature": row[6],
+                    }
+                    for row in cursor.fetchall()
+                ]
+                conn.close()
+            except Exception as e:
+                # Fall back to MCP tool if DB query fails
+                search_result = self._call("ast_search", type="fn", limit=100)
+                if isinstance(search_result, dict):
+                    all_funcs = search_result.get("results", [])
+                elif isinstance(search_result, list):
+                    all_funcs = search_result
         
         for func in all_funcs:
-            func_id = func.get("qualified_name", func.get("name", "unknown"))
+            func_id = func.get("qualified_name") or func.get("name", "unknown")
+            file_path = func.get("file_path", "")
+            
             nodes.append({
                 "id": f"func:{func_id}",
                 "type": "function",
                 "label": func.get("name", func_id),
                 "name": func.get("name", ""),
-                "file_path": func.get("file_path", ""),
-                "line": func.get("line", 0),
-                "kind": func.get("kind", "function"),
+                "file_path": file_path,
+                "line": func.get("start_line", 0),
+                "kind": func.get("type", "function"),
+                "signature": func.get("signature", ""),
             })
             
             # Link to module
-            file_path = func.get("file_path", "")
             if file_path:
-                # Find matching module
-                for mod in modules:
-                    mod_path = mod.get("path", "")
-                    if mod_path and file_path.startswith(mod_path):
+                if "/" not in file_path:
+                    links.append({
+                        "source": f"func:{func_id}",
+                        "target": "mod:<root>",
+                        "type": "belongs_to"
+                    })
+                else:
+                    best_mod = None
+                    best_len = 0
+                    for mod in modules:
+                        mod_path = mod.get("path", "")
+                        if mod_path and mod_path != "<root>" and file_path.startswith(mod_path + "/"):
+                            if len(mod_path) > best_len:
+                                best_len = len(mod_path)
+                                best_mod = mod_path
+                    if best_mod:
                         links.append({
                             "source": f"func:{func_id}",
-                            "target": f"mod:{mod_path}",
+                            "target": f"mod:{best_mod}",
                             "type": "belongs_to"
                         })
-                        break
         
         return {
             "nodes": nodes,
@@ -361,7 +400,7 @@ class CodeGraphBridge:
             "stats": {
                 "total_nodes": len(nodes),
                 "total_functions": len([n for n in nodes if n["type"] == "function"]),
-                "total_features": len([n for n in nodes if n["type"] == "feature"]),
+                "total_modules": len([n for n in nodes if n["type"] == "module"]),
                 "total_links": len(links),
             },
             "view_mode": "full"
@@ -370,8 +409,11 @@ class CodeGraphBridge:
     def _get_simplified_graph(self, health: Dict) -> Dict[str, Any]:
         """Get simplified graph for large repos (>200 functions).
         
-        Shows only modules and their relationships.
+        Shows modules + top functions by caller count.
+        Queries SQLite directly to get actual function data.
         """
+        import sqlite3
+        
         pmap = self.project_map()
         
         nodes = []
@@ -384,7 +426,7 @@ class CodeGraphBridge:
             symbol_count = mod.get("symbol_count", 0)
             nodes.append({
                 "id": f"mod:{mod_path}",
-                "type": "feature",
+                "type": "module",
                 "label": mod_path,
                 "name": mod_path,
                 "symbol_count": symbol_count,
@@ -403,8 +445,49 @@ class CodeGraphBridge:
                     "type": "depends_on"
                 })
         
-        # Add top hot functions as representative samples
-        hot_funcs = pmap.get("hot_functions", [])[:20]  # Limit to top 20
+        # Query SQLite for representative functions from different files
+        db_path = self.project_path / ".code-graph" / "index.db"
+        hot_funcs = []
+        if db_path.exists():
+            try:
+                conn = sqlite3.connect(str(db_path))
+                cursor = conn.cursor()
+                # Get one function per file to show diversity
+                cursor.execute("""
+                    SELECT 
+                        n.name,
+                        n.qualified_name,
+                        f.path as file_path,
+                        n.signature,
+                        0 as caller_count
+                    FROM nodes n
+                    JOIN files f ON n.file_id = f.id
+                    WHERE n.type IN ('function', 'method')
+                      AND n.name NOT LIKE 'test_%'
+                      AND n.name != '__init__'
+                      AND n.name != '<module>'
+                    GROUP BY f.path
+                    ORDER BY f.path
+                    LIMIT 30
+                """)
+                hot_funcs = [
+                    {
+                        "name": row[0],
+                        "qualified_name": row[1] or row[0],
+                        "file_path": row[2],
+                        "signature": row[3],
+                        "caller_count": row[4],
+                    }
+                    for row in cursor.fetchall()
+                ]
+                conn.close()
+            except Exception:
+                pass
+        
+        # Fallback to project_map hot_functions if DB query fails
+        if not hot_funcs:
+            hot_funcs = pmap.get("hot_functions", [])[:20]
+        
         for func in hot_funcs:
             func_name = func.get("name", "")
             func_id = func.get("qualified_name", func_name)
@@ -416,33 +499,48 @@ class CodeGraphBridge:
                 "type": "function",
                 "label": func_name,
                 "name": func_name,
+                "file_path": func.get("file_path", ""),
+                "signature": func.get("signature", ""),
                 "caller_count": func.get("caller_count", 0),
                 "is_hot": True,
             })
             
             # Link to module
             file_path = func.get("file_path", "")
-            for mod in modules:
-                mod_path = mod.get("path", "")
-                if mod_path and file_path.startswith(mod_path):
+            if file_path:
+                if "/" not in file_path:
                     links.append({
                         "source": f"func:{func_id}",
-                        "target": f"mod:{mod_path}",
+                        "target": "mod:<root>",
                         "type": "belongs_to"
                     })
-                    break
+                else:
+                    best_mod = None
+                    best_len = 0
+                    for mod in modules:
+                        mod_path = mod.get("path", "")
+                        if mod_path and mod_path != "<root>" and file_path.startswith(mod_path + "/"):
+                            if len(mod_path) > best_len:
+                                best_len = len(mod_path)
+                                best_mod = mod_path
+                    if best_mod:
+                        links.append({
+                            "source": f"func:{func_id}",
+                            "target": f"mod:{best_mod}",
+                            "type": "belongs_to"
+                        })
         
         return {
             "nodes": nodes,
             "links": links,
             "stats": {
                 "total_nodes": health.get("nodes_count", 0),
-                "total_functions": health.get("nodes_count", 0),  # Approximate
+                "total_functions": health.get("nodes_count", 0),
                 "total_features": len(modules),
                 "total_links": len(links),
                 "shown_nodes": len(nodes),
                 "shown_functions": len([n for n in nodes if n["type"] == "function"]),
-                "note": f"Simplified view: showing {len(nodes)} of {health.get('nodes_count', 0)} nodes",
+                "note": f"Simplified view: {len(hot_funcs)} of ~{health.get('nodes_count', 0)} functions shown",
             },
             "view_mode": "simplified"
         }
@@ -517,20 +615,24 @@ class CodeGraphBridge:
     # ------------------------------------------------------------------
     
     def get_feature_impact(self, symbol: str, depth: int = 2) -> Dict[str, Any]:
-        """Get feature-level impact analysis.
+        """Get comprehensive impact analysis with affected functions.
         
-        Combines technical impact with feature context from project.md.
+        Uses enhanced analyzer that builds affected functions from:
+        - Symbol references (find_references)
+        - File-level function discovery (SQLite)
+        - Feature mapping (project.md)
+        - Cross-feature dependencies
         
         Args:
             symbol: Function/symbol to analyze
             depth: Call graph depth
             
         Returns:
-            Feature impact report with development pointers
+            Impact report with affected functions, features, divergence, pointers
         """
-        from .feature_impact import FeatureImpactAnalyzer
-        analyzer = FeatureImpactAnalyzer(self, str(self.project_path))
-        return analyzer.generate_feature_report(symbol, depth=depth)
+        from .impact_analyzer import ImpactAnalyzer
+        analyzer = ImpactAnalyzer(self, str(self.project_path))
+        return analyzer.analyze_impact(symbol, depth=depth)
     
     def get_feature_context(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Get feature context for a function.
