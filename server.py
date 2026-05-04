@@ -129,18 +129,42 @@ async def trellis_sync(
     Uses code-graph-mcp to index the codebase.
     """
     try:
-        bridge = _get_bridge(repo_path or project_id)
+        resolved = _resolve_project_path(repo_path or project_id)
+        
+        # Clear bridge cache for this project to avoid DB lock conflicts
+        cache_key = repo_path or project_id
+        if cache_key in _bridge_cache:
+            _bridge_cache[cache_key].close()
+            del _bridge_cache[cache_key]
+        
+        bridge = _get_bridge(cache_key)
+        
+        # Trigger actual indexing
+        if incremental:
+            sync_result = bridge.incremental_sync()
+        else:
+            sync_result = bridge.sync_project()
+        
+        # After sync, we need a fresh bridge since the old one closed its process
+        if cache_key in _bridge_cache:
+            _bridge_cache[cache_key].close()
+            del _bridge_cache[cache_key]
+        
+        # Get fresh bridge for health check
+        bridge = _get_bridge(cache_key)
         health = bridge.health_check()
+        
         return json.dumps({
             "status": "ok",
             "project_id": project_id,
             "nodes": health.get("nodes_count", 0),
             "files": health.get("files_count", 0),
             "message": "Project synced successfully",
+            "sync_details": sync_result,
         }, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
-
+    
 
 @mcp.tool()
 @_track_tool("trellis_get_feature")
@@ -851,28 +875,19 @@ if __name__ == "__main__":
         
         @http_app.get("/projects")
         async def list_projects():
-            """List available projects with graph data."""
-            import os
+            """List synced projects with graph data."""
+            from src.trellis.utils import get_trellis_data_dir
             projects = []
             
-            # Current directory (trellis itself)
-            current = Path(__file__).parent
-            if (current / ".code-graph").exists() or (current / ".trellis").exists():
-                projects.append({
-                    "id": "trellis",
-                    "name": "Trellis",
-                    "path": str(current),
-                })
-            
-            # Parent directory - scan for subdirectories with .code-graph or .trellis
-            parent = current.parent
-            if parent.exists():
-                for item in parent.iterdir():
-                    if item.is_dir() and item.name != current.name:
-                        has_graph = (item / ".code-graph").exists() or (item / ".trellis").exists()
-                        # Also check for common project indicators
-                        is_project = has_graph or (item / ".git").exists() or (item / "src").exists()
-                        if is_project:
+            # Only show projects that have been synced (have .code-graph data)
+            trellis_data = get_trellis_data_dir()
+            projects_dir = trellis_data / "projects"
+            if projects_dir.exists():
+                for item in projects_dir.iterdir():
+                    if item.is_dir():
+                        code_graph_dir = item / ".code-graph"
+                        # Only include if .code-graph exists and has index.db
+                        if code_graph_dir.exists() and (code_graph_dir / "index.db").exists():
                             projects.append({
                                 "id": item.name,
                                 "name": item.name,

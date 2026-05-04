@@ -242,10 +242,23 @@ project/
 ├── .trellis/
 │   ├── notes/           # Doc Graph (markdown files)
 │   └── data/            # Analytics
-├── .code-graph/
+├── .code-graph/         # Symlink to trellis data directory
 │   └── index.db         # Code Graph (SQLite)
 └── project.md           # Feature specifications
+
+# Trellis data directory (~/.trellis/)
+.trellis/
+├── projects/
+│   ├── {project-id}/
+│   │   ├── .code-graph/     # Code Graph (SQLite)
+│   │   └── notes/           # Doc Graph (markdown files)
+│   └── ...
+└── analytics.db
 ```
+
+**Note**: By default, `.code-graph` data is stored in the trellis data directory (`~/.trellis/projects/{project-id}/`) to avoid polluting your project directories. A symlink or junction is created in your project directory so code-graph-mcp can find it. If symlink creation fails (e.g., on Windows without permissions), data stays in the project directory as a fallback.
+
+**Git**: `.code-graph` is automatically added to `.gitignore` and should never be committed. It's generated data that is re-created by running `trellis_sync`.
 
 ## Tips
 

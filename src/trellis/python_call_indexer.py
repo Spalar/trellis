@@ -12,13 +12,15 @@ import sqlite3
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+from .utils import resolve_code_graph_db
+
 
 class PythonCallGraphIndexer:
     """Extracts call relationships from Python files and inserts into code-graph DB."""
     
     def __init__(self, project_path: str) -> None:
         self.project_path = Path(project_path)
-        self.db_path = self.project_path / ".code-graph" / "index.db"
+        self.db_path = resolve_code_graph_db(project_path)
     
     def index_calls(self) -> Dict[str, int]:
         """Index all Python call relationships.

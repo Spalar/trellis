@@ -238,7 +238,8 @@ class NoteGraph:
             
             # Query DB directly for functions
             import sqlite3
-            db_path = self.project_path / ".code-graph" / "index.db"
+            from .utils import resolve_code_graph_db
+            db_path = resolve_code_graph_db(str(self.project_path))
             code_nodes = []
             
             if db_path.exists():

@@ -118,4 +118,6 @@ Thumbs.db
 #Pipfile.lock
 #poetry.lock
 #uv.lock
-.code-graph/
+
+# Trellis generated data (symlinks to ~/.trellis/)
+.code-graph

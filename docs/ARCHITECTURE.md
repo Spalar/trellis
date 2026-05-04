@@ -264,7 +264,7 @@ results = bridge.search("authenticate user")
 
 - **Network Isolation**: code-graph-mcp runs as local subprocess
 - **No Auth Required**: Local development only (`TRELLIS_ALLOW_NO_AUTH`)
-- **Data Isolation**: Project data in `.code-graph/` and `.trellis/`
+- **Data Isolation**: Project data in `~/.trellis/projects/{id}/.code-graph/` and `.trellis/`
 - **Build from Source**: Auditable, pinned versions
 - **Security Scan**: `python scripts/security_scan.py`
 
@@ -308,6 +308,11 @@ trellis/
 │   ├── python_call_indexer.py   # Python call extraction
 │   └── feature_impact.py        # Feature context
 ├── tests/
+├── .trellis-data/               # Trellis project storage (created at runtime)
+│   └── projects/
+│       └── {project-id}/
+│           ├── .code-graph/     # Code graph databases
+│           └── notes/           # Knowledge notes
 ├── third_party/
 │   └── code-graph-mcp/          # Git submodule
 ├── visualizer.html              # Web UI

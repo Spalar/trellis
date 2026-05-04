@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-# Avoid circular import - FeatureImpactAnalyzer imported inside methods
+from .utils import get_code_graph_path
 
 
 class CodeGraphBridge:
@@ -39,6 +39,9 @@ class CodeGraphBridge:
         self._proc: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
         self._req_id = 0
+        
+        # Setup .code-graph in trellis data directory with symlink in project
+        self.code_graph_path = get_code_graph_path(self.project_path)
         
         # Register cleanup
         atexit.register(self.close)
@@ -158,14 +161,26 @@ class CodeGraphBridge:
             return result
     
     def close(self) -> None:
-        """Clean up subprocess."""
+        """Clean up subprocess and release file locks."""
         if self._proc is not None:
             try:
                 self._proc.terminate()
                 self._proc.wait(timeout=5)
             except (subprocess.TimeoutExpired, ProcessLookupError):
-                self._proc.kill()
+                try:
+                    self._proc.kill()
+                    self._proc.wait(timeout=2)
+                except Exception:
+                    pass
             self._proc = None
+        
+        # Clean up lock files to prevent conflicts
+        try:
+            lock_file = self.code_graph_path / "index.lock"
+            if lock_file.exists():
+                lock_file.unlink()
+        except Exception:
+            pass
     
     def __enter__(self):
         return self
@@ -281,6 +296,77 @@ class CodeGraphBridge:
         result = self._call("get_index_status")
         return self._normalize_result(result)
     
+    def _run_cli(self, *args, timeout: int = 300) -> Dict[str, Any]:
+        """Run code-graph-mcp CLI command.
+        
+        Used for operations that can't be done via MCP (like indexing).
+        
+        Args:
+            *args: CLI arguments
+            timeout: Max seconds to wait
+            
+        Returns:
+            Dict with stdout, stderr, returncode
+        """
+        import subprocess
+        import time
+        
+        # Close any existing process and wait for file locks to release
+        self.close()
+        time.sleep(0.5)  # Give OS time to release file locks
+        
+        cmd = [str(self.binary_path)] + list(args)
+        env = os.environ.copy()
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(self.project_path),
+            timeout=timeout,
+        )
+        
+        return {
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "returncode": result.returncode,
+            "success": result.returncode == 0,
+        }
+    
+    def sync_project(self) -> Dict[str, Any]:
+        """Sync/index the project codebase.
+        
+        Triggers code-graph-mcp to index all source files.
+        Runs 'rebuild-index --confirm' CLI command.
+        """
+        # Close any running MCP server to avoid DB lock conflicts
+        self.close()
+        
+        result = self._run_cli("rebuild-index", "--confirm")
+        
+        if result["success"]:
+            # Also run python call indexer to add call edges
+            try:
+                from .python_call_indexer import PythonCallGraphIndexer
+                indexer = PythonCallGraphIndexer(str(self.project_path))
+                indexer.index_calls()
+            except Exception:
+                pass  # Optional enhancement
+        
+        return result
+    
+    def incremental_sync(self) -> Dict[str, Any]:
+        """Run incremental index update.
+        
+        Only indexes changed files since last sync.
+        Runs 'incremental-index' CLI command.
+        """
+        # Close any running MCP server to avoid DB lock conflicts
+        self.close()
+        
+        return self._run_cli("incremental-index")
+    
     # ------------------------------------------------------------------
     # Visualizer API (converts to our format)
     # ------------------------------------------------------------------
@@ -318,7 +404,7 @@ class CodeGraphBridge:
             })
         
         # Query SQLite directly for all functions (bypasses MCP token limits)
-        db_path = self.project_path / ".code-graph" / "index.db"
+        db_path = self.code_graph_path / "index.db"
         all_funcs = []
         if db_path.exists():
             try:
@@ -446,7 +532,7 @@ class CodeGraphBridge:
                 })
         
         # Query SQLite for representative functions from different files
-        db_path = self.project_path / ".code-graph" / "index.db"
+        db_path = self.code_graph_path / "index.db"
         hot_funcs = []
         if db_path.exists():
             try:

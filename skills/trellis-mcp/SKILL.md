@@ -1,11 +1,13 @@
 ---
 name: "trellis-mcp"
-description: "Graph-based code analysis and strategic planning using Trellis MCP tools. Use when the user wants to: (1) analyze or understand a codebase structure, (2) assess impact of proposed changes, (3) trace dependencies between features or functions, (4) plan implementations with full context of existing code, (5) explore feature graphs and identify module boundaries, (6) verify changes after implementation. Triggers: 'analyze this codebase', 'what's the impact of changing X', 'help me understand this project structure', 'before I make changes', 'trace dependencies', 'impact analysis', 'feature graph', 'understand the architecture', 'how does X relate to Y', 'plan this refactor', 'which tests should I write'.
+description: "Graph-based code analysis and knowledge management using Trellis MCP tools. Use when the user wants to: (1) analyze or understand a codebase structure, (2) assess impact of proposed changes, (3) trace dependencies between features or functions, (4) plan implementations with full context, (5) create or query linkable documentation, (6) verify changes after implementation. Triggers: 'analyze this codebase', 'what's the impact of changing X', 'help me understand this project', 'before I make changes', 'trace dependencies', 'impact analysis', 'feature graph', 'understand the architecture', 'how does X relate to Y', 'plan this refactor', 'create a note about', 'find documentation about'.
 ---
 
 # Trellis MCP Skill
 
-Use Trellis graph tools to analyze codebases, detect impacts, and plan implementations strategically. This skill adapts proven software design principles to AI-assisted coding with graph-based context.
+Use Trellis tools to analyze codebases and manage linkable documentation. Trellis provides two graph views:
+- **Code Graph**: Auto-generated from your codebase (functions, classes, calls)
+- **Doc Graph**: Your knowledge notes with wiki links `[[Note]]` and code mentions `@Function`
 
 ## When to Use Trellis
 
@@ -14,9 +16,9 @@ Use Trellis graph tools to analyze codebases, detect impacts, and plan implement
 - About to modify any function or feature
 - Refactoring or restructuring code
 - Adding new features that might affect existing ones
-- Reviewing code changes (PRs, commits)
+- Need to document architecture decisions or feature specs
+- Want to track divergence between docs and implementation
 - Debugging issues that span multiple files
-- Planning test strategies
 
 ### DON'T Use Trellis When:
 - Writing isolated utility functions with no dependencies
@@ -26,27 +28,31 @@ Use Trellis graph tools to analyze codebases, detect impacts, and plan implement
 
 ## Core Principles
 
-### 1. Grill the AI (with Trellis)
+### 1. Discovery First
 
-Before asking the AI to write or modify code, use Trellis to build mental models of the codebase. Sync the repository, list features, and inspect function details. Never write code in a vacuum.
+Before writing or modifying code, use Trellis to build mental models of the codebase. Sync the repository, list features, and inspect function details. Never write code in a vacuum.
 
 **How**: Run `trellis_sync` + `trellis_list_features` at the start of every session.
 
-### 2. Understand Before Changing
+### 2. Analyze Before Changing
 
-Always analyze impact before modifying code. Trellis shows you:
+Always run impact analysis before modifying code. Trellis shows you:
 - What functions call the one you're changing
 - What features depend on it
-- What constraints must be maintained
-- What tests need updating
+- Risk level (LOW/MEDIUM/HIGH)
+- Affected function count and file count
 
 **How**: Run `trellis_analyze_impact` before any change.
 
 ### 3. Document as You Go
 
-Create knowledge notes for key features and decisions. This builds institutional memory that persists across sessions.
+Create knowledge notes for key features, decisions, and divergence tracking. Notes support:
+- Wiki links: `[[Other Note]]` for connecting ideas
+- Code mentions: `@function_name` for referencing code
+- Bidirectional backlinks (auto-computed)
+- YAML frontmatter tags
 
-**How**: Use `trellis_create_note` to capture decisions, architecture, and divergence tracking.
+**How**: Use `trellis_create_note` to capture knowledge.
 
 ### 4. Verify After Changes
 
@@ -65,24 +71,28 @@ Re-sync and re-analyze after implementing changes to catch unintended side effec
    trellis_sync(project_id="my-project", repo_path="/path/to/repo")
    ```
    *When: At the start of every session*
+   *What it does: Indexes the codebase into the code graph*
 
-2. **List features**:
+2. **List features/modules**:
    ```
    trellis_list_features(project_id="my-project")
    ```
    *When: After sync, to see high-level structure*
+   *Returns: List of modules with symbol counts*
 
 3. **Search for specifics**:
    ```
-   trellis_search(project_id="my-project", query="authentication")
+   trellis_search(project_id="my-project", query="authenticate", limit=10)
    ```
    *When: Looking for specific functions or features*
+   *Returns: Matching functions with file paths and scores*
 
-4. **Inspect key features**:
+4. **Inspect key functions**:
    ```
-   trellis_get_function(project_id="my-project", function_path="src/auth.py:authenticate_user")
+   trellis_get_function(project_id="my-project", function_path="authenticate_user")
    ```
    *When: Need to understand a specific function*
+   *Returns: Function details including signature, file path, line numbers*
 
 **Stop when you can answer**: "What are the 3-5 most relevant features for this task?"
 
@@ -94,27 +104,29 @@ Re-sync and re-analyze after implementing changes to catch unintended side effec
    ```
    trellis_analyze_impact(
      project_id="my-project",
-     function_path="src/auth.py:authenticate_user",
-     change_summary="Change return type from string to object"
+     function_path="authenticate_user",
+     depth_mode="standard"
    )
    ```
    *When: Before modifying any function*
+   *Returns: Risk level, affected functions count, affected files count, feature impacts*
+   *Parameters:*
+   - `function_path`: Function name or qualified name
+   - `depth_mode`: "standard" or "deep" (default: "standard")
 
-2. **Trace critical paths**:
-   ```
-   trellis_trace_path(
-     project_id="my-project",
-     from_feature="Authentication",
-     to_feature="UserManagement"
-   )
-   ```
-   *When: Understanding how two features interact*
-
-3. **Check module boundaries**:
+2. **Check module boundaries**:
    ```
    trellis_get_boundary_map(project_id="my-project")
    ```
    *When: Refactoring or extracting modules*
+   *Returns: Module dependency map with boundary crossings*
+
+3. **Find hotspots**:
+   ```
+   trellis_detect_hotspots(project_id="my-project")
+   ```
+   *When: Optimizing or identifying complex areas*
+   *Returns: High-centrality functions (most referenced)*
 
 **Stop when you can answer**: "What could break, and what tests do I need first?"
 
@@ -132,16 +144,18 @@ Re-sync and re-analyze after implementing changes to catch unintended side effec
    - Preserve interfaces at specific file:line locations
    - Follow constraints from project.md
 
-3. **Update documentation**:
+3. **Document decisions**:
    ```
    trellis_create_note(
      project_id="my-project",
      note_id="decision-auth-refactor",
      title="Auth Refactor Decision",
-     content="# Auth Refactor\n\nChanged authenticate_user to return object instead of string.\n\n## Impact\n- 3 callers updated\n- Feature: API Endpoints affected"
+     content="# Auth Refactor\n\nChanged authenticate_user to return object instead of string.\n\n## Impact\n- 3 callers updated\n- Feature: API Endpoints affected",
+     tags="decision, auth, refactor"
    )
    ```
    *When: Making architectural decisions*
+   *Note: `tags` is optional, comma-separated string*
 
 ### Phase 4: Verification (After Changes)
 
@@ -155,7 +169,7 @@ Re-sync and re-analyze after implementing changes to catch unintended side effec
 
 2. **Re-analyze**:
    ```
-   trellis_analyze_impact(project_id="my-project", function_path="src/auth.py:authenticate_user")
+   trellis_analyze_impact(project_id="my-project", function_path="authenticate_user")
    ```
    *When: Verifying changes are safe*
 
@@ -164,38 +178,53 @@ Re-sync and re-analyze after implementing changes to catch unintended side effec
    trellis_analyze_diff(project_id="my-project", diff="...")
    ```
    *When: Reviewing PRs or commits*
+   *Note: Currently simplified; use trellis_analyze_impact for detailed analysis*
 
 ## Key Tools Reference
 
-### Code Graph Tools
+### Code Graph Tools (10 tools)
 
-| Tool | When to Use | How Often |
-|------|-------------|-----------|
-| `trellis_sync` | Index or re-index codebase | Start of session, after changes |
-| `trellis_list_features` | Understand project structure | Once per session |
-| `trellis_search` | Find functions or features | As needed |
-| `trellis_get_function` | Inspect function details | Before modifying |
-| `trellis_analyze_impact` | Assess change impact | Before every change |
-| `trellis_trace_path` | Trace feature dependencies | When refactoring |
-| `trellis_detect_hotspots` | Find complex areas | When optimizing |
-| `trellis_visualize_graph` | Get graph data | For visualization |
+| Tool | Parameters | Returns | When to Use |
+|------|-----------|---------|-------------|
+| `trellis_sync` | `project_id`, `repo_path`, `config_path`, `incremental` | Status, node count, file count | Start of session, after changes |
+| `trellis_list_features` | `project_id` | List of modules with symbol counts | Understand structure |
+| `trellis_search` | `project_id`, `query`, `limit` | Matching functions with paths | Find functions by concept |
+| `trellis_get_function` | `project_id`, `function_path` | Function details (signature, file, line) | Inspect before modifying |
+| `trellis_get_feature` | `project_id`, `feature_name` | Module overview with symbols | Understand a module |
+| `trellis_analyze_impact` | `project_id`, `function_path`, `depth_mode` | Risk level, affected counts, features | Before every change |
+| `trellis_trace_path` | `project_id`, `from_feature`, `to_feature` | Dependency path between features | Trace dependencies |
+| `trellis_detect_hotspots` | `project_id` | High-centrality functions | Find complex areas |
+| `trellis_visualize_graph` | `project_id` | Graph data for UI | Visualization |
+| `trellis_analyze_diff` | `project_id`, `diff` | Diff analysis summary | PR reviews |
 
-### Doc Graph Tools
+### Doc Graph Tools (6 tools)
 
-| Tool | When to Use | How Often |
-|------|-------------|-----------|
-| `trellis_create_note` | Create/update knowledge | After decisions |
-| `trellis_get_note` | Read full note content | When referencing docs |
-| `trellis_search_notes` | Find notes by keyword | As needed |
-| `trellis_delete_note` | Remove obsolete notes | During cleanup |
-| `trellis_knowledge_graph` | Get full doc graph | For overview |
+| Tool | Parameters | Returns | When to Use |
+|------|-----------|---------|-------------|
+| `trellis_create_note` | `project_id`, `note_id`, `title`, `content`, `tags` | Note ID, title, links, mentions | Create/update knowledge |
+| `trellis_get_note` | `project_id`, `note_id` | Full note with backlinks | Read note content |
+| `trellis_search_notes` | `project_id`, `query` | Matching notes with excerpts | Find notes by keyword |
+| `trellis_delete_note` | `project_id`, `note_id` | Status message | Remove obsolete notes |
+| `trellis_knowledge_graph` | `project_id` | Full graph with notes + code nodes | Get overview |
+| `trellis_get_boundary_map` | `project_id` | Module boundary map | Identify boundaries |
 
-### Analysis Tools
+### Tool Parameter Details
 
-| Tool | When to Use | How Often |
-|------|-------------|-----------|
-| `trellis_analyze_diff` | Review code changes | PR reviews |
-| `trellis_get_boundary_map` | Identify module boundaries | Refactoring |
+**trellis_sync**:
+- `project_id`: Project identifier (used for all subsequent calls)
+- `repo_path`: Path to repository (optional, defaults to project_id)
+- `config_path`: Config file path (default: ".trellis/config.yaml")
+- `incremental`: Only index changed files (default: false)
+
+**trellis_analyze_impact**:
+- `function_path`: Function name or qualified name (e.g., "authenticate_user" or "auth.authenticate_user")
+- `depth_mode`: "standard" or "deep" for analysis depth
+
+**trellis_create_note**:
+- `note_id`: Unique identifier (e.g., "feature-auth", "decision-jwt")
+- `title`: Human-readable title
+- `content`: Markdown content with `[[links]]` and `@mentions`
+- `tags`: Comma-separated tags (optional)
 
 ## Decision Tree
 
@@ -207,33 +236,36 @@ Starting a new task?
 About to change code?
   → Phase 2: Strategy
     → Run: trellis_analyze_impact
-    → Read: references/impact-analysis.md
 
 Changed code?
   → Phase 4: Verification
     → Run: trellis_sync + trellis_analyze_impact
 
 Reviewing someone else's code?
-  → Run: trellis_analyze_diff
+  → Run: trellis_analyze_diff (or trellis_analyze_impact on key functions)
 
 Multiple approaches possible?
   → Run: trellis_trace_path to compare coupling
   → Pick the less coupled option
 
-New domain terms appearing?
+Need to document something?
   → Run: trellis_create_note
-  → Update: references/ubiquitous-language-template.md
+  → Link related notes with [[Note]] and code with @Function
 
 Code diverging from docs?
   → Run: trellis_get_note on relevant feature
   → Update note with divergence section
+
+Looking for documentation?
+  → Run: trellis_search_notes
+  → Or: trellis_knowledge_graph for full overview
 ```
 
 ## Common Patterns
 
 ### Pattern: Adding a Parameter to a Function
 
-1. `trellis_get_function` - Check current callers
+1. `trellis_get_function` - Check current signature and callers
 2. `trellis_analyze_impact` - Assess impact of adding parameter
 3. Modify function signature
 4. Update all callers (in dependency order: leaves first)
@@ -243,7 +275,7 @@ Code diverging from docs?
 
 1. `trellis_trace_path` - Find all dependencies on extracted code
 2. `trellis_get_boundary_map` - Check current boundaries
-3. `trellis_analyze_feature_impact` - Assess feature-level impact
+3. `trellis_analyze_impact` on key functions - Assess impact
 4. Create new module
 5. Move code
 6. Update imports
@@ -265,10 +297,18 @@ Code diverging from docs?
 4. `trellis_get_function` - Understand key functions
 5. `trellis_create_note` - Document learnings
 
+### Pattern: Documenting Architecture Decisions
+
+1. `trellis_create_note` with note_id="decision-{topic}"
+2. Include context, decision, consequences
+3. Link related features with `[[Feature-Name]]`
+4. Reference code with `@function_name`
+5. Add divergence section if implementation differs
+
 ## Reference Files
 
-- **`references/impact-analysis.md`**: Detailed workflow for conducting impact analysis, choosing between function-level and feature-level tools, and interpreting results
-- **`references/ubiquitous-language-template.md`**: Template for creating a `project.md` file that captures domain terminology, feature names, and architectural decisions
+- **`references/impact-analysis.md`**: Detailed workflow for conducting impact analysis and interpreting results
+- **`references/ubiquitous-language-template.md`**: Template for creating a `project.md` file that captures domain terminology and architectural decisions
 
 Read the relevant reference file before Phase 2 (Strategy) of the workflow.
 
@@ -279,5 +319,6 @@ Read the relevant reference file before Phase 2 (Strategy) of the workflow.
 3. **Document decisions**: Use `trellis_create_note` to capture why decisions were made
 4. **Verify after changes**: Re-sync and re-analyze after implementation
 5. **Track divergence**: Note when implementation differs from specification
-6. **Use specific paths**: Reference functions by `file:line` from Trellis output
-7. **Read references**: Check `references/impact-analysis.md` before complex changes
+6. **Use specific paths**: Reference functions by name from Trellis output
+7. **Link everything**: Use `[[Note]]` and `@Function` to connect docs and code
+8. **Read references**: Check `references/impact-analysis.md` before complex changes

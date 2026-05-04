@@ -25,6 +25,7 @@ from .feature_impact import (
     FeatureSpec,
     ProjectContextParser,
 )
+from .utils import resolve_code_graph_db
 
 
 class ImpactAnalyzer:
@@ -36,7 +37,7 @@ class ImpactAnalyzer:
         self.bridge = bridge
         self.project_path = Path(project_path)
         self.context = ProjectContextParser(project_path)
-        self._db_path = self.project_path / ".code-graph" / "index.db"
+        self._db_path = resolve_code_graph_db(project_path)
     
     def analyze_impact(self, symbol: str, depth: int = 2) -> Dict:
         """Analyze impact of changing a symbol.
