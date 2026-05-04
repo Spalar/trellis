@@ -82,7 +82,7 @@ Python wrapper around code-graph-mcp with:
 
 **File**: `src/trellis/knowledge_graph.py`
 
-Obsidian-like note system:
+Linkable docs note system:
 - Markdown notes in `.trellis/notes/`
 - Wiki links `[[Note]]`
 - Code mentions `@Function`
@@ -123,7 +123,7 @@ Dual-mode server:
 
 **File**: `visualizer.html`
 
-Notion-like web UI:
+Clean web UI:
 - Split pane: Editor + Graph
 - Code Graph / Doc Graph toggle
 - Interactive D3.js force-directed graph

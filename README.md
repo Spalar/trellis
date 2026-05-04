@@ -13,10 +13,11 @@ Trellis is a dual-knowledge system that combines **code graph analysis** with **
 - "Decision AUTH-001 says use JWT tokens - are you maintaining that?"
 - "Constraint: Token expiry must be < 24 hours"
 
-### Knowledge Graph
-- Obsidian-like markdown notes with wiki links `[[Note]]`
-- Code mentions `@Function`
-- Divergence tracking between docs and code
+### Linkable Docs
+- Write markdown notes that link to each other with `[[Note]]`
+- Reference code directly with `@Function` mentions
+- Track where implementation diverges from plans
+- Bidirectional backlinks show related notes automatically
 
 ## Quick Start
 
@@ -39,7 +40,7 @@ open http://localhost:17317
 - **Doc Graph**: Your knowledge notes with cross-links to code
 - **Impact Analysis**: See what breaks before you change code
 - **Divergence Detection**: Warns when code violates feature specs
-- **Web UI**: Notion-like visualizer with interactive graph
+- **Web UI**: Clean visualizer with interactive graph
 - **MCP Tools**: 16 tools for AI coding agents
 
 ## Project Structure

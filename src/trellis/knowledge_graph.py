@@ -1,4 +1,4 @@
-"""Trellis Knowledge Graph - Obsidian-like note system.
+"""Trellis Knowledge Graph - Linkable docs note system.
 
 Core concepts:
 - Notes are markdown files in .trellis/notes/
@@ -20,7 +20,7 @@ from datetime import datetime
 
 @dataclass
 class Note:
-    """A knowledge note (like Obsidian)."""
+    """A knowledge note with linkable references."""
     id: str
     title: str
     content: str
@@ -59,7 +59,7 @@ class GraphEdge:
 
 
 class NoteGraph:
-    """Knowledge graph manager - like Obsidian's graph view."""
+    """Knowledge graph manager for linked notes."""
     
     def __init__(self, project_path: str):
         self.project_path = Path(project_path)

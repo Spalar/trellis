@@ -7,7 +7,7 @@
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.2/marked.min.js"></script>
 <style>
-  /* === Notion-like Clean Design === */
+  /* === Clean UI Design === */
   :root {
     --bg: #ffffff;
     --bg-hover: #f7f6f3;
@@ -1415,7 +1415,7 @@ function renderGraph() {
       unhighlightNode();
     });
 
-  // Node circles — Agar.io / Obsidian style
+  // Node circles — Clean style
   nodeGroups.each(function(d) {
     const g = d3.select(this);
     const color = colors[d.type] || '#888';

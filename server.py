@@ -335,7 +335,7 @@ async def trellis_get_boundary_map(
 
 
 # ------------------------------------------------------------------
-# Knowledge Graph Tools (Obsidian-like)
+# Knowledge Graph Tools
 # ------------------------------------------------------------------
 
 @mcp.tool()

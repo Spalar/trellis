@@ -2,7 +2,7 @@
 
 ## Overview
 
-Trellis is a dual-knowledge system combining Code Graph (from code-graph-mcp) with Doc Graph (Obsidian-like markdown notes) for unified impact analysis and divergence tracking.
+Trellis is a dual-knowledge system combining Code Graph (from code-graph-mcp) with Doc Graph (linkable markdown notes) for unified impact analysis and divergence tracking.
 
 ## Feature: Code Graph Bridge
 
@@ -46,7 +46,7 @@ Analyzes how code changes impact feature-level decisions and constraints.
 
 ## Feature: Knowledge Graph
 
-Obsidian-like markdown notes with wiki links and bidirectional backlinks.
+Linkable markdown notes with wiki links and bidirectional backlinks.
 
 ### Decisions
 - KG-001: Store notes as markdown files (because: human-readable, git-friendly)
@@ -86,10 +86,10 @@ Provides 16 MCP tools for code analysis and knowledge graph operations.
 
 ## Feature: Visualizer
 
-Notion-like web UI for exploring code and doc graphs.
+Clean web UI for exploring code and doc graphs.
 
 ### Decisions
-- UI-001: Clean Notion-like design (because: familiar, low cognitive load)
+- UI-001: Clean UI design (because: familiar, low cognitive load)
   - Constraint: Use ui-monospace font
   - Constraint: Split pane (editor + graph)
 - UI-002: Dual graph views (because: separate concerns)
