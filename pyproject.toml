@@ -34,10 +34,12 @@ markers = [
 
 [tool.setuptools]
 py-modules = [
+  "analytics",
   "auth",
   "engine",
   "extractor",
   "feature_intent",
+  "impact_analyzer",
   "models",
   "router",
   "server",

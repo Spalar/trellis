@@ -3,278 +3,1199 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Trellis Graph Visualizer</title>
+<title>Trellis</title>
 <script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.2/marked.min.js"></script>
 <style>
+  /* === Notion-like Clean Design === */
   :root {
-    --bg: #0b0c10;
-    --panel: #111318;
-    --surface: #16181f;
-    --text: #e6e8ef;
-    --muted: #8b92a8;
-    --accent: #00f2c3;
-    --accent2: #3b82f6;
-    --danger: #ef4444;
-    --warn: #f59e0b;
-    --border: rgba(255,255,255,0.08);
-    --glow: rgba(0, 242, 195, 0.25);
+    --bg: #ffffff;
+    --bg-hover: #f7f6f3;
+    --bg-sidebar: #f7f6f3;
+    --border: #e9e9e7;
+    --text: #37352f;
+    --text-secondary: #6b6b6b;
+    --text-muted: #9a9a9a;
+    --accent: #2eaadc;
+    --accent-hover: #2485ad;
+    --danger: #e16259;
+    --success: #4dab70;
+    --warn: #f6c050;
+    
+    --code-bg: #f7f6f3;
+    --code-border: #e9e9e7;
+    
+    --node-feature: #2eaadc;
+    --node-function: #fd7e14;
+    --node-class: #a259ff;
+    --node-note: #4dab70;
+    --node-decision: #f6c050;
+    --link: #9a9a9a;
+    
+    --font-ui: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+    --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, sans-serif;
   }
 
-  * { box-sizing: border-box; }
+  [data-theme="dark"] {
+    --bg: #191919;
+    --bg-hover: #2a2a2a;
+    --bg-sidebar: #202020;
+    --border: #373737;
+    --text: #ffffff;
+    --text-secondary: #a0a0a0;
+    --text-muted: #666666;
+    --accent: #2eaadc;
+    --accent-hover: #5bc3f0;
+    --code-bg: #2a2a2a;
+    --code-border: #373737;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
   html, body {
-    margin: 0; padding: 0;
     width: 100%; height: 100%;
     background: var(--bg);
     color: var(--text);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    font-family: var(--font-ui);
+    font-size: 13px;
+    line-height: 1.5;
     overflow: hidden;
   }
 
-  #app { display: flex; width: 100vw; height: 100vh; }
+  /* === App Layout === */
+  #app {
+    display: flex;
+    width: 100vw;
+    height: 100vh;
+  }
 
-  /* Sidebar */
+  /* === Left Sidebar === */
   #sidebar {
-    width: 320px;
-    flex-shrink: 0;
-    background: var(--panel);
+    width: 240px;
+    background: var(--bg-sidebar);
     border-right: 1px solid var(--border);
     display: flex;
     flex-direction: column;
-    padding: 16px;
-    gap: 12px;
-    overflow-y: auto;
-    z-index: 10;
+    flex-shrink: 0;
+    overflow: hidden;
   }
-  #sidebar h2 { margin: 0 0 4px; font-size: 18px; letter-spacing: 0.5px; }
-  #sidebar p.lead { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
-  .divider { height: 1px; background: var(--border); margin: 6px 0; }
 
-  .field { display: flex; flex-direction: column; gap: 6px; }
-  .field label { font-size: 11px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.8px; }
-  .field input, .field select {
-    background: var(--surface);
-    border: 1px solid var(--border);
+  #sidebar-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    font-weight: 600;
+    font-size: 14px;
     color: var(--text);
-    padding: 8px 10px;
-    border-radius: 6px;
-    font-size: 12px;
-    outline: none;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
   }
-  .row { display: flex; gap: 8px; }
-  .row .field { flex: 1; }
-
-  button {
-    background: linear-gradient(135deg, #00f2c3, #0ea5e9);
-    border: none;
-    color: #000;
-    font-weight: 700;
-    padding: 10px 12px;
-    border-radius: 8px;
+  
+  #project-select {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    font-family: var(--font-ui);
+    font-size: 11px;
+    padding: 2px 6px;
     cursor: pointer;
-    font-size: 12px;
-    letter-spacing: 0.4px;
+    max-width: 120px;
+    text-overflow: ellipsis;
+    overflow: hidden;
+    white-space: nowrap;
   }
-  button.secondary {
-    background: var(--surface);
+  
+  #project-select:hover {
+    border-color: var(--text-muted);
+  }
+  
+  #project-select:focus {
+    outline: none;
+    border-color: #3b82f6;
+  }
+
+  .sidebar-section {
+    padding: 8px 0;
+    flex-shrink: 0;
+  }
+
+  .sidebar-section-title {
+    padding: 4px 16px;
+    font-size: 11px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    letter-spacing: 0.5px;
+    font-weight: 600;
+  }
+
+  .sidebar-item {
+    padding: 6px 16px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-secondary);
+    transition: all 0.1s;
+    font-size: 13px;
+    border-left: 3px solid transparent;
+  }
+
+  .sidebar-item:hover {
+    background: var(--bg-hover);
     color: var(--text);
-    border: 1px solid var(--border);
   }
-  button:hover { filter: brightness(1.1); }
-  button:active { transform: translateY(1px); }
 
-  .stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
-  .stat {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 10px;
-    text-align: center;
-  }
-  .stat .num { font-size: 18px; font-weight: 700; color: var(--accent); }
-  .stat .label { font-size: 10px; color: var(--muted); text-transform: uppercase; margin-top: 4px; }
-
-  .legend { display: flex; flex-wrap: wrap; gap: 6px; }
-  .legend-item {
-    display: flex; align-items: center; gap: 6px;
-    font-size: 11px; color: var(--muted);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    padding: 4px 8px;
-    border-radius: 6px;
-  }
-  .dot { width: 10px; height: 10px; border-radius: 50%; }
-
-  /* Graph area */
-  #graph-wrap {
-    flex: 1;
-    position: relative;
-    background: radial-gradient(circle at center, #0f111a 0%, #0b0c10 100%);
-  }
-  #graph { width: 100%; height: 100%; }
-
-  /* Tooltip */
-  #tooltip {
-    position: absolute;
-    background: rgba(11, 12, 16, 0.95);
-    border: 1px solid var(--border);
-    padding: 12px 14px;
-    border-radius: 8px;
-    pointer-events: none;
+  .sidebar-item .delete-btn {
     opacity: 0;
-    transition: opacity 0.15s ease;
+    transition: opacity 0.15s;
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 3px;
     font-size: 12px;
-    line-height: 1.5;
-    max-width: 360px;
-    z-index: 20;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
-    backdrop-filter: blur(6px);
   }
-  #tooltip strong { color: var(--accent); font-size: 13px; }
-  #tooltip .tag {
-    display: inline-block;
+
+  .sidebar-item:hover .delete-btn {
+    opacity: 0.5;
+  }
+
+  .sidebar-item .delete-btn:hover {
+    opacity: 1;
+    background: rgba(239, 68, 68, 0.15);
+  }
+
+  .sidebar-item.active {
+    background: var(--bg);
+    color: var(--accent);
+    border-left-color: var(--accent);
+  }
+
+  .sidebar-item .icon {
+    width: 16px;
+    height: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 14px;
+  }
+
+  .sidebar-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 8px 16px;
+  }
+
+  /* === Main Content === */
+  #main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* === Toolbar === */
+  #toolbar {
+    height: 44px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .toolbar-group {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+  }
+
+  .toolbar-btn {
+    padding: 6px 12px;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    border-radius: 4px;
+    font-family: var(--font-ui);
+    font-size: 12px;
+    transition: all 0.15s;
+  }
+
+  .toolbar-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+  }
+
+  .toolbar-btn.active {
+    background: var(--code-bg);
+    color: var(--accent);
+    border-color: var(--border);
+  }
+
+  .toolbar-sep {
+    width: 1px;
+    height: 20px;
+    background: var(--border);
+    margin: 0 4px;
+  }
+
+  /* === Split Pane === */
+  #content {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+  }
+
+  #editor-pane {
+    width: 45%;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--border);
+    background: var(--bg);
+    overflow: hidden;
+  }
+
+  #editor-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  #editor-title {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  #editor-type-badge {
     font-size: 10px;
     text-transform: uppercase;
-    color: #000;
-    background: var(--accent);
-    padding: 1px 6px;
-    border-radius: 4px;
-    margin-left: 8px;
-    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 2px 8px;
+    border-radius: 3px;
+    background: var(--code-bg);
+    color: var(--text-muted);
+    font-weight: 600;
+    flex-shrink: 0;
   }
 
-  /* Overlay controls */
-  #controls {
-    position: absolute;
-    top: 12px; right: 12px;
-    display: flex; gap: 6px;
-    z-index: 5;
+  #editor-tabs {
+    display: flex;
+    padding: 4px 16px 0;
+    gap: 2px;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    flex-shrink: 0;
   }
-  .pill {
-    background: rgba(17, 19, 24, 0.85);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 6px 10px;
-    border-radius: 20px;
-    font-size: 11px;
+
+  .editor-tab {
+    padding: 6px 12px;
     cursor: pointer;
-    backdrop-filter: blur(6px);
+    font-size: 12px;
+    color: var(--text-muted);
+    border-bottom: 2px solid transparent;
+    white-space: nowrap;
+    transition: all 0.1s;
   }
-  .pill.active { border-color: var(--accent); color: var(--accent); }
 
-  /* Loader */
-  #loader {
-    position: absolute; inset: 0;
-    display: flex; align-items: center; justify-content: center;
-    background: rgba(11, 12, 16, 0.7);
-    z-index: 30; opacity: 0; pointer-events: none;
-    transition: opacity 0.2s;
+  .editor-tab:hover {
+    color: var(--text);
   }
-  #loader.visible { opacity: 1; pointer-events: auto; }
-  .spinner {
-    width: 40px; height: 40px;
-    border: 3px solid rgba(255,255,255,0.08);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* Node inspector panel inside sidebar */
+  .editor-tab.active {
+    color: var(--text);
+    border-bottom-color: var(--text);
+  }
+
+  #editor-body {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+  }
+
+  #editor-input {
+    flex: 1;
+    background: var(--bg);
+    color: var(--text);
+    border: none;
+    padding: 16px;
+    font-family: var(--font-ui);
+    font-size: 14px;
+    line-height: 1.6;
+    resize: none;
+    outline: none;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+
+  #editor-input::placeholder {
+    color: var(--text-muted);
+  }
+
+  #editor-preview {
+    flex: 1;
+    padding: 16px;
+    overflow-y: auto;
+    font-family: var(--font-body);
+    line-height: 1.6;
+    display: none;
+  }
+
+  #editor-preview h1, #editor-preview h2, #editor-preview h3 {
+    color: var(--text);
+    margin: 16px 0 8px;
+    font-weight: 600;
+  }
+
+  #editor-preview h1 { font-size: 24px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+  #editor-preview h2 { font-size: 20px; }
+  #editor-preview h3 { font-size: 16px; }
+  #editor-preview p { margin: 8px 0; }
+  #editor-preview code { background: var(--code-bg); padding: 2px 6px; border-radius: 3px; font-family: var(--font-ui); font-size: 13px; }
+  #editor-preview pre { background: var(--code-bg); border: 1px solid var(--code-border); padding: 12px; border-radius: 6px; overflow-x: auto; margin: 8px 0; }
+  #editor-preview pre code { background: none; padding: 0; }
+  #editor-preview a { color: var(--accent); text-decoration: none; }
+  #editor-preview a:hover { text-decoration: underline; }
+  #editor-preview ul, #editor-preview ol { margin: 8px 0; padding-left: 24px; }
+  #editor-preview li { margin: 4px 0; }
+  #editor-preview blockquote { border-left: 3px solid var(--accent); padding-left: 12px; margin: 8px 0; color: var(--text-secondary); }
+  #editor-preview .wiki-link { color: var(--accent); background: rgba(46, 170, 220, 0.1); padding: 1px 4px; border-radius: 3px; cursor: pointer; }
+  #editor-preview .wiki-link:hover { background: rgba(46, 170, 220, 0.2); }
+  #editor-preview .mention { color: var(--accent); cursor: pointer; font-weight: 600; }
+  #editor-preview .tag { display: inline-block; background: var(--code-bg); padding: 2px 8px; border-radius: 12px; font-size: 12px; color: var(--text-secondary); margin: 2px; }
+
+  /* === Graph Pane === */
+  #graph-pane {
+    flex: 1;
+    position: relative;
+    background: var(--bg);
+    overflow: hidden;
+  }
+
+  #graph {
+    width: 100%;
+    height: 100%;
+    cursor: grab;
+  }
+
+  #graph:active { cursor: grabbing; }
+
+  /* === Inspector Panel === */
   #inspector {
-    background: var(--surface);
+    position: absolute;
+    bottom: 16px;
+    right: 16px;
+    width: 280px;
+    max-height: 300px;
+    background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 10px;
-    font-size: 12px;
+    padding: 12px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+    overflow-y: auto;
+    opacity: 0;
+    transition: opacity 0.2s;
+    pointer-events: none;
+    z-index: 10;
   }
-  #inspector .k { color: var(--muted); }
-  #inspector .v { color: var(--text); }
-  #inspector pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; font-size: 11px; color: var(--muted); }
 
-  svg text { font-family: inherit; pointer-events: none; }
+  #inspector.visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .inspector-title {
+    font-weight: 600;
+    font-size: 13px;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .inspector-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    font-size: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .inspector-row:last-child { border-bottom: none; }
+
+  .inspector-key { color: var(--text-muted); }
+  .inspector-value { color: var(--text); text-align: right; }
+
+  .inspector-tag {
+    display: inline-block;
+    background: var(--code-bg);
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin: 2px;
+  }
+
+  /* === Status Bar === */
+  #status-bar {
+    height: 28px;
+    background: var(--bg-sidebar);
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    font-size: 11px;
+    color: var(--text-muted);
+    gap: 16px;
+    flex-shrink: 0;
+  }
+
+  /* === Scrollbar === */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+  /* === Code Details Panel === */
+  #code-details {
+    padding: 12px 16px;
+    background: var(--code-bg);
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    display: none;
+  }
+
+  #code-details.visible { display: block; }
+
+  .code-meta {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 8px;
+  }
+
+  .code-meta-item {
+    color: var(--text-muted);
+  }
+
+  .code-meta-item strong {
+    color: var(--text);
+  }
+
+  .code-signature {
+    font-family: var(--font-ui);
+    background: var(--bg);
+    padding: 8px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    margin-top: 8px;
+    font-size: 12px;
+    overflow-x: auto;
+  }
+
+  /* === Buttons === */
+  .btn {
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: var(--font-ui);
+    font-size: 12px;
+    transition: all 0.15s;
+  }
+
+  .btn:hover {
+    background: var(--bg-hover);
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+  }
+
+  .btn-primary:hover {
+    background: var(--accent-hover);
+  }
+
+  .btn-small {
+    padding: 4px 8px;
+    font-size: 11px;
+  }
+
+  .btn-danger {
+    background: var(--danger);
+    color: white;
+    border-color: var(--danger);
+  }
+
+  .btn-danger:hover {
+    background: #c94a42;
+    border-color: #c94a42;
+  }
+
+  /* === Modal === */
+  .modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+    backdrop-filter: blur(2px);
+  }
+
+  .modal-content {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    width: 400px;
+    max-width: 90vw;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    animation: modalSlideIn 0.15s ease-out;
+  }
+
+  @keyframes modalSlideIn {
+    from {
+      opacity: 0;
+      transform: translateY(-20px) scale(0.95);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  .modal-header {
+    padding: 16px 20px 0;
+  }
+
+  .modal-header h3 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
+    font-family: var(--font-body);
+  }
+
+  .modal-body {
+    padding: 12px 20px 20px;
+  }
+
+  .modal-body p {
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+  }
+
+  .modal-footer {
+    padding: 0 20px 16px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  /* === Resize Handle === */
+  .resize-handle {
+    width: 4px;
+    cursor: col-resize;
+    background: var(--border);
+    transition: background 0.15s;
+  }
+
+  .resize-handle:hover {
+    background: var(--accent);
+  }
+
+  /* === Graph Controls === */
+  #graph-controls {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    display: flex;
+    gap: 4px;
+    z-index: 5;
+  }
+
+  .graph-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: 4px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    transition: all 0.15s;
+  }
+
+  .graph-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+  }
+
+  /* === Empty State === */
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-muted);
+    font-size: 14px;
+    text-align: center;
+    padding: 40px;
+  }
+
+  .empty-state-icon {
+    font-size: 48px;
+    margin-bottom: 16px;
+    opacity: 0.5;
+  }
+
+  /* === Impact Analysis === */
+  .impact-panel {
+    padding: 12px;
+    background: var(--code-bg);
+    border-radius: 6px;
+    margin-top: 8px;
+    border: 1px solid var(--border);
+  }
+
+  .impact-title {
+    font-weight: 600;
+    font-size: 12px;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .impact-risk-low { color: var(--success); }
+  .impact-risk-medium { color: var(--warn); }
+  .impact-risk-high { color: var(--danger); }
+
+  .impact-item {
+    padding: 4px 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  /* === Legend === */
+  #graph-legend {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    z-index: 5;
+    max-width: 140px;
+  }
+
+  .legend-title {
+    font-size: 10px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    letter-spacing: 0.5px;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 0;
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+
+  .legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    border: 2px solid transparent;
+  }
+
+  .legend-dot.function {
+    background: var(--bg);
+    border-color: var(--node-function);
+  }
+
+  .legend-dot.class {
+    background: var(--bg);
+    border-color: var(--node-class);
+  }
+
+  .legend-dot.feature {
+    background: var(--bg);
+    border-color: var(--node-feature);
+  }
+
+  .legend-dot.note {
+    background: var(--bg);
+    border-color: var(--node-note);
+  }
+
+  .legend-dot.decision {
+    background: var(--bg);
+    border-color: var(--node-decision);
+  }
+
+  .legend-dot.module {
+    background: var(--bg);
+    border-color: var(--text-muted);
+  }
+
+  /* === Agar.io Style Blob Animations === */
+  @keyframes blob-pulse {
+    0%, 100% { transform: scale(1); opacity: 0.15; }
+    50% { transform: scale(1.08); opacity: 0.25; }
+  }
+
+  @keyframes blob-wobble {
+    0%, 100% { transform: translate(0, 0); }
+    25% { transform: translate(1px, -1px); }
+    50% { transform: translate(-1px, 1px); }
+    75% { transform: translate(1px, 1px); }
+  }
+
+  .node-expandable {
+    cursor: pointer !important;
+  }
+
+  .node-blob-glow {
+    animation: blob-pulse 3s ease-in-out infinite;
+  }
+
+  .node-blob-body {
+    animation: blob-wobble 4s ease-in-out infinite;
+  }
 </style>
 </head>
 <body>
 <div id="app">
+  <!-- Left Sidebar -->
   <aside id="sidebar">
-    <h2>Trellis Graph</h2>
-    <p class="lead">Explore code topology. Click nodes to inspect. Drag to pan. Scroll to zoom. Toggle visibility with filters.</p>
-    <div class="divider"></div>
-    <div class="field">
-      <label>Project ID</label>
-      <input id="projectId" type="text" value="trellis" />
+    <div id="sidebar-header">
+      Trellis
+      <select id="project-select" onchange="onProjectChange(this.value)" title="Select project">
+        <option value="trellis">trellis</option>
+      </select>
     </div>
-    <div class="row">
-      <div class="field">
-        <label>Server Host</label>
-        <input id="host" type="text" value="http://localhost:17317" />
+    
+    <div class="sidebar-section">
+      <div class="sidebar-section-title" id="explorer-title">Explorer</div>
+      <div id="explorer-content">
+        <!-- Populated by JS -->
       </div>
     </div>
-    <div class="row">
-      <button id="btnLoad" onclick="loadGraph()">Load Graph</button>
-      <button id="btnImpact" class="secondary" onclick="toggleImpactMode()">Impact Mode</button>
-    </div>
-    <div class="divider"></div>
-    <div class="stats" id="stats">
-      <div class="stat"><div class="num" id="stFeat">0</div><div class="label">Features</div></div>
-      <div class="stat"><div class="num" id="stFunc">0</div><div class="label">Functions</div></div>
-      <div class="stat"><div class="num" id="stLinks">0</div><div class="label">Links</div></div>
-    </div>
-    <div class="divider"></div>
-    <div class="legend" id="legend"></div>
-    <div class="divider"></div>
-    <div id="inspector" style="display:none">
-      <div><span class="k">Node:</span> <span class="v" id="inName"></span></div>
-      <div><span class="k">Type:</span> <span class="v" id="inType"></span></div>
-      <div><span class="k">Feature:</span> <span class="v" id="inFeature"></span></div>
-      <pre id="inExtra"></pre>
-    </div>
-    <div class="divider"></div>
-    <div id="projectInfoPanel">
-      <label style="font-size:11px;text-transform:uppercase;color:var(--muted);letter-spacing:0.8px">Project Info</label>
-      <div id="projectInfoStatus" style="font-size:12px;color:var(--muted);margin:6px 0">Loading...</div>
-      <div id="projectInfoFeatures" style="margin-top:8px;font-size:11px;color:var(--muted)"></div>
-    </div>
-    <div class="divider"></div>
-    <div id="specPanel">
-      <label style="font-size:11px;text-transform:uppercase;color:var(--muted);letter-spacing:0.8px">Project Spec</label>
-      <div id="specStatus" style="font-size:12px;color:var(--muted);margin:6px 0">Loading...</div>
-      <div class="row">
-        <button id="btnEditSpec" class="secondary" onclick="openSpecEditor()">Edit Spec</button>
+    
+    <div class="sidebar-divider"></div>
+    
+    <div class="sidebar-section">
+      <div class="sidebar-section-title">Actions</div>
+      <div class="sidebar-item" onclick="createNewNote()">
+        <span class="icon">+</span>
+        New Note
       </div>
-      <div id="specPreview" style="margin-top:8px;font-size:11px;color:var(--muted);max-height:120px;overflow-y:auto"></div>
+      <div class="sidebar-item" onclick="syncProject()">
+        <span class="icon">↻</span>
+        Sync Code
+      </div>
+      <div class="sidebar-item" onclick="toggleTheme()">
+        <span class="icon">◐</span>
+        Toggle Theme
+      </div>
     </div>
   </aside>
-  <div id="graph-wrap">
-    <div id="controls">
-      <div class="pill" id="pillFeatures" onclick="toggleLayer('feature')">Features</div>
-      <div class="pill" id="pillFunctions" onclick="toggleLayer('function')">Functions</div>
-      <div class="pill" id="pillDeps" onclick="toggleLayer('feature_dep')">Feature Deps</div>
-      <div class="pill" id="pillCalls" onclick="toggleLayer('calls')">Call Graph</div>
-      <div class="pill" onclick="resetZoom()">Fit</div>
+
+  <!-- Main Content -->
+  <div id="main">
+    <!-- Toolbar -->
+    <div id="toolbar">
+      <div class="toolbar-group">
+        <button class="toolbar-btn active" id="btn-code" onclick="switchView('code')">Code Graph</button>
+        <button class="toolbar-btn" id="btn-docs" onclick="switchView('docs')">Doc Graph</button>
+      </div>
+      <div class="toolbar-sep"></div>
+      <div class="toolbar-group">
+        <button class="toolbar-btn" onclick="fitGraph()">Fit</button>
+        <button class="toolbar-btn" onclick="togglePhysics()">Physics</button>
+        <button class="toolbar-btn" onclick="refreshGraph()">Refresh</button>
+      </div>
+      <div class="toolbar-sep"></div>
+      <div class="toolbar-group">
+        <span id="status-text" style="color: var(--text-muted); font-size: 12px;">Ready</span>
+      </div>
     </div>
-    <svg id="graph"></svg>
-    <div id="tooltip"></div>
-    <div id="loader"><div class="spinner"></div></div>
+
+    <!-- Content -->
+    <div id="content">
+      <!-- Editor Pane -->
+      <div id="editor-pane">
+        <div id="editor-header">
+          <div id="editor-title">Select a node</div>
+          <div id="editor-type-badge">CODE</div>
+        </div>
+        
+        <div id="editor-tabs">
+          <div class="editor-tab active" id="tab-details" onclick="switchEditorTab('details')">Details</div>
+          <div class="editor-tab" id="tab-docs" onclick="switchEditorTab('docs')">Docs</div>
+          <div class="editor-tab" id="tab-impact" onclick="switchEditorTab('impact')">Impact</div>
+        </div>
+        
+        <div id="code-details">
+          <div class="code-meta">
+            <div class="code-meta-item">Type: <strong id="code-type">-</strong></div>
+            <div class="code-meta-item">File: <strong id="code-file">-</strong></div>
+            <div class="code-meta-item">Line: <strong id="code-line">-</strong></div>
+          </div>
+          <div class="code-signature" id="code-signature">-</div>
+        </div>
+        
+        <div id="editor-body">
+          <textarea id="editor-input" placeholder="Select a node to view details...
+
+Code Graph: Click a function or feature to see details
+Doc Graph: Click a note to view and edit
+
+You can add architectural notes, divergence tracking, and decisions here." oninput="onEditorChange()"></textarea>
+          <div id="editor-preview"></div>
+        </div>
+      </div>
+
+      <!-- Resize Handle -->
+      <div class="resize-handle" id="resizeHandle"></div>
+
+      <!-- Graph Pane -->
+      <div id="graph-pane">
+        <div id="graph-controls">
+          <button class="graph-btn" onclick="fitGraph()" title="Fit">⛶</button>
+          <button class="graph-btn" onclick="togglePhysics()" title="Toggle Physics">⚡</button>
+          <button class="graph-btn" onclick="zoomIn()" title="Zoom In">+</button>
+          <button class="graph-btn" onclick="zoomOut()" title="Zoom Out">−</button>
+        </div>
+        
+        <!-- Legend -->
+        <div id="graph-legend">
+          <div class="legend-title">Legend</div>
+          <div class="legend-items" id="legend-items"></div>
+        </div>
+        
+        <svg id="graph"></svg>
+        
+        <!-- Inspector -->
+        <div id="inspector">
+          <div class="inspector-title">
+            <span id="inspector-icon">●</span>
+            <span id="inspector-name">Node</span>
+          </div>
+          <div id="inspector-content">
+            <div class="inspector-row">
+              <span class="inspector-key">Type</span>
+              <span class="inspector-value" id="inspector-type">-</span>
+            </div>
+            <div class="inspector-row">
+              <span class="inspector-key">ID</span>
+              <span class="inspector-value" id="inspector-id">-</span>
+            </div>
+            <div class="inspector-row" id="inspector-file-row">
+              <span class="inspector-key">File</span>
+              <span class="inspector-value" id="inspector-file">-</span>
+            </div>
+            <div class="inspector-row" id="inspector-line-row">
+              <span class="inspector-key">Line</span>
+              <span class="inspector-value" id="inspector-line">-</span>
+            </div>
+            <div id="inspector-tags"></div>
+            <div id="inspector-impact"></div>
+            <div id="inspector-actions" style="margin-top: 12px; display: flex; gap: 8px;">
+              <button class="btn btn-primary btn-small" onclick="editNode()">Edit</button>
+              <button class="btn btn-small" onclick="analyzeImpact()">Impact</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Status Bar -->
+    <div id="status-bar">
+      <span id="status-stats">0 nodes, 0 edges</span>
+      <span id="status-mode">Code Graph</span>
+      <span id="status-zoom">100%</span>
+    </div>
   </div>
 </div>
 
 <script>
-/* -------------------- State -------------------- */
-let allNodes = [];
-let allLinks = [];
-let projectFeatures = [];
-let projectId = 'trellis';
+// === State ===
+let currentView = 'code';
+let currentNode = null;
+let graphData = { nodes: [], edges: [] };
+let projectId = localStorage.getItem('trellis-project') || 'trellis';
 let baseHost = 'http://localhost:17317';
-let activeLayers = new Set(['feature', 'function', 'feature_dep', 'belongs_to']);
-let impactMode = false;
-let selectedNodeId = null;
+let physicsEnabled = true;
+let currentZoom = 1;
+let editorTab = 'details';
+let svg, gZoom, gLinks, gNodes, gLabels, simulation;
+let moduleStates = {}; // Track collapsed/expanded modules: { moduleId: 'collapsed' | 'expanded' }
+let nodePositions = {}; // Cache for smooth transitions: { nodeId: {x, y} }
 
-let svg, gZoom, gLinks, gNodes, simulation;
-const width = () => document.getElementById('graph-wrap').clientWidth;
-const height = () => document.getElementById('graph-wrap').clientHeight;
+const width = () => document.getElementById('graph-pane').clientWidth;
+const height = () => document.getElementById('graph-pane').clientHeight;
 
-/* -------------------- Init -------------------- */
+// === Colors ===
+const colors = {
+  feature: '#2eaadc',
+  function: '#fd7e14',
+  method: '#fd7e14',
+  class: '#a259ff',
+  note: '#4dab70',
+  decision: '#f6c050',
+  module: '#6c757d',
+  code_note: '#e16259'
+};
+
+const typeLabels = {
+  feature: 'Feature',
+  function: 'Function',
+  method: 'Method',
+  class: 'Class',
+  note: 'Note',
+  decision: 'Decision',
+  module: 'Module',
+  code_note: 'Code Note'
+};
+
+// === Project Management ===
+async function loadProjects() {
+  try {
+    const resp = await fetch(`${baseHost}/projects`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const select = document.getElementById('project-select');
+    
+    // Clear existing options
+    select.innerHTML = '';
+    
+    // Populate dropdown
+    for (const proj of data.projects || []) {
+      const opt = document.createElement('option');
+      opt.value = proj.id;
+      opt.textContent = proj.name;
+      if (proj.id === projectId) opt.selected = true;
+      select.appendChild(opt);
+    }
+  } catch (e) {
+    console.error('Failed to load projects:', e);
+  }
+}
+
+function onProjectChange(newProjectId) {
+  projectId = newProjectId;
+  localStorage.setItem('trellis-project', projectId);
+  
+  // Reload current view
+  if (currentView === 'code') {
+    loadCodeGraph();
+  } else {
+    loadDocGraph();
+  }
+  
+  clearEditor();
+  updateStatus(`Switched to project: ${projectId}`);
+}
+
+// === Init ===
+document.addEventListener('DOMContentLoaded', () => {
+  initGraph();
+  loadProjects();
+  
+  // Load graph after projects are fetched
+  if (currentView === 'code') {
+    loadCodeGraph();
+  } else {
+    loadDocGraph();
+  }
+  
+  setupResizeHandle();
+  
+  // Check for dark mode preference
+  if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+    document.documentElement.setAttribute('data-theme', 'dark');
+  }
+});
+
+// === View Switching ===
+function switchView(view) {
+  currentView = view;
+  
+  // Update toolbar
+  document.querySelectorAll('#toolbar .toolbar-btn').forEach(el => el.classList.remove('active'));
+  document.getElementById('btn-' + view).classList.add('active');
+  
+  // Update status
+  document.getElementById('status-mode').textContent = view === 'code' ? 'Code Graph' : 'Doc Graph';
+  
+  // Update explorer title
+  document.getElementById('explorer-title').textContent = view === 'code' ? 'Code Explorer' : 'Doc Explorer';
+  
+  // Update editor badge
+  document.getElementById('editor-type-badge').textContent = view === 'code' ? 'CODE' : 'DOC';
+  
+  // Load appropriate graph
+  if (view === 'code') {
+    loadCodeGraph();
+  } else {
+    loadDocGraph();
+  }
+  
+  // Clear editor
+  clearEditor();
+}
+
+// === Graph Loading ===
+async function loadCodeGraph() {
+  updateStatus('Loading code graph...');
+  nodePositions = {}; // Reset position cache for fresh layout
+  moduleStates = {}; // Reset module collapse states
+  
+  try {
+    const resp = await fetch(`${baseHost}/graph/${encodeURIComponent(projectId)}`);
+    if (!resp.ok) throw new Error(await resp.text());
+    
+    const data = await resp.json();
+    graphData = {
+      nodes: data.nodes || [],
+      edges: data.links || data.edges || []
+    };
+    
+    renderGraph();
+    updateExplorer('code');
+    updateStatus(`Code Graph: ${data.stats?.total_functions || 0} functions`);
+  } catch (e) {
+    console.error('Failed to load code graph:', e);
+    updateStatus('Error loading code graph');
+    loadDemoCodeGraph();
+  }
+}
+
+async function loadDocGraph() {
+  updateStatus('Loading doc graph...');
+  nodePositions = {}; // Reset position cache
+  moduleStates = {}; // Reset module states (doc graph doesn't use modules)
+  
+  try {
+    const resp = await fetch(`${baseHost}/knowledge-graph/${encodeURIComponent(projectId)}`);
+    if (!resp.ok) throw new Error(await resp.text());
+    
+    const data = await resp.json();
+    graphData = {
+      nodes: data.nodes || [],
+      edges: data.links || data.edges || []
+    };
+    
+    renderGraph();
+    updateExplorer('docs');
+    updateStatus(`Doc Graph: ${data.stats?.total_notes || 0} notes`);
+  } catch (e) {
+    console.error('Failed to load doc graph:', e);
+    updateStatus('Error loading doc graph');
+    loadDemoDocGraph();
+  }
+}
+
+function loadDemoCodeGraph() {
+  graphData = {
+    nodes: [
+      { id: 'mod:<root>', type: 'module', label: '<root>', name: '<root>' },
+      { id: 'mod:scripts', type: 'module', label: 'scripts', name: 'scripts' },
+      { id: 'mod:tests', type: 'module', label: 'tests', name: 'tests' },
+      { id: 'func:CodeGraphBridge', type: 'class', label: 'CodeGraphBridge', name: 'CodeGraphBridge', file_path: 'src/trellis/bridge.py', line: 19 },
+      { id: 'func:analyze_impact', type: 'function', label: 'analyze_impact', name: 'analyze_impact', file_path: 'src/trellis/bridge.py', line: 191 },
+      { id: 'func:get_ast_node', type: 'function', label: 'get_ast_node', name: 'get_ast_node', file_path: 'src/trellis/bridge.py', line: 224 },
+      { id: 'func:validate_auth', type: 'function', label: 'validate_auth', name: 'validate_auth', file_path: 'auth.py', line: 13 },
+    ],
+    edges: [
+      { source: 'func:CodeGraphBridge', target: 'mod:src/trellis', type: 'belongs_to' },
+      { source: 'func:analyze_impact', target: 'func:CodeGraphBridge', type: 'calls' },
+      { source: 'func:get_ast_node', target: 'func:CodeGraphBridge', type: 'calls' },
+      { source: 'func:validate_auth', target: 'mod:<root>', type: 'belongs_to' },
+    ]
+  };
+  renderGraph();
+  updateExplorer('code');
+  updateStatus('Demo Code Graph loaded');
+}
+
+function loadDemoDocGraph() {
+  graphData = {
+    nodes: [
+      { id: 'note:README', type: 'note', label: 'README', name: 'README', content: '# Trellis\n\nKnowledge graph system.' },
+      { id: 'note:feature-auth', type: 'note', label: 'Auth Feature', name: 'Auth Feature', content: '# Auth\n\n- @validate_auth\n- [[README]]' },
+      { id: 'note:decision-sqlite', type: 'decision', label: 'Use SQLite', name: 'Use SQLite', content: '# Decision\n\nWe chose SQLite.' },
+    ],
+    edges: [
+      { source: 'note:feature-auth', target: 'note:README', type: 'links_to' },
+      { source: 'note:feature-auth', target: 'func:validate_auth', type: 'mentions' },
+    ]
+  };
+  renderGraph();
+  updateExplorer('docs');
+  updateStatus('Demo Doc Graph loaded');
+}
+
+// === Explorer ===
+function updateExplorer(view) {
+  const container = document.getElementById('explorer-content');
+  
+  if (!graphData.nodes.length) {
+    container.innerHTML = '<div style="padding: 8px 16px; color: var(--text-muted); font-size: 12px;">No items</div>';
+    return;
+  }
+  
+  const items = graphData.nodes
+    .filter(n => view === 'code' ? (n.type === 'function' || n.type === 'method' || n.type === 'class') : (n.type === 'note' || n.type === 'decision'))
+    .sort((a, b) => (a.label || a.name).localeCompare(b.label || b.name));
+  
+  container.innerHTML = items.map(n => {
+    const isDoc = n.type === 'note' || n.type === 'decision';
+    const deleteBtn = isDoc ? `<span class="delete-btn" onclick="event.stopPropagation(); deleteNote('${n.id}', '${(n.label || n.name).replace(/'/g, "\\'")}')" title="Delete note">🗑️</span>` : '';
+    return `
+    <div class="sidebar-item" onclick="selectNodeById('${n.id}')">
+      <span class="icon" style="color: ${colors[n.type] || '#888'}">●</span>
+      <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;">${n.label || n.name}</span>
+      ${deleteBtn}
+    </div>
+  `}).join('');
+}
+
+// === Graph Rendering ===
 function initGraph() {
   const el = document.getElementById('graph');
   el.setAttribute('width', width());
@@ -285,28 +1206,19 @@ function initGraph() {
     .attr('height', height())
     .attr('viewBox', [0, 0, width(), height()]);
 
-  // Glow filter
-  const defs = svg.append('defs');
-  const filter = defs.append('filter')
-    .attr('id', 'glow')
-    .attr('x', '-50%')
-    .attr('y', '-50%')
-    .attr('width', '200%')
-    .attr('height', '200%');
-  filter.append('feGaussianBlur')
-    .attr('stdDeviation', '2.5')
-    .attr('result', 'coloredBlur');
-  const feMerge = filter.append('feMerge');
-  feMerge.append('feMergeNode').attr('in', 'coloredBlur');
-  feMerge.append('feMergeNode').attr('in', 'SourceGraphic');
-
   gZoom = svg.append('g');
   gLinks = gZoom.append('g').attr('class', 'links');
   gNodes = gZoom.append('g').attr('class', 'nodes');
+  gLabels = gZoom.append('g').attr('class', 'labels');
 
   const zoom = d3.zoom()
-    .scaleExtent([0.05, 8])
-    .on('zoom', (e) => gZoom.attr('transform', e.transform));
+    .scaleExtent([0.02, 8])
+    .on('zoom', (e) => {
+      gZoom.attr('transform', e.transform);
+      currentZoom = e.transform.k;
+      updateLabelVisibility();
+    });
+  
   svg.call(zoom).on('dblclick.zoom', null);
 
   window.addEventListener('resize', () => {
@@ -318,448 +1230,1151 @@ function initGraph() {
   });
 }
 
-/* -------------------- Data -------------------- */
-async function loadGraph() {
-  projectId = document.getElementById('projectId').value.trim() || 'trellis';
-  baseHost = document.getElementById('host').value.trim() || 'http://localhost:17317';
-  setLoading(true);
-  try {
-    const [graphResp, specResp] = await Promise.all([
-      fetch(`${baseHost}/graph/${encodeURIComponent(projectId)}`),
-      fetch(`${baseHost}/spec/${encodeURIComponent(projectId)}`),
-    ]);
-    
-    if (!graphResp.ok) throw new Error(await graphResp.text());
-    const data = await graphResp.json();
-    allNodes = data.nodes || [];
-    allLinks = data.links || [];
-    
-    // Update project info panel from graph data
-    const featureNodes = allNodes.filter(n => n.type === 'feature');
-    const funcNodes = allNodes.filter(n => n.type === 'function');
-    updateProjectInfoPanel({
-      status: 'ok',
-      features: featureNodes.map(n => n.id),
-      total_functions: funcNodes.length,
-      total_links: allLinks.length
-    });
-
-    // Load spec status
-    if (specResp.ok) {
-      const specData = await specResp.json();
-      updateSpecPanel(specData);
-    }
-
-    impactMode = false;
-    updateStats(data.stats);
-    buildLegend(data.nodes);
-    render();
-  } catch (e) {
-    alert('Failed to load graph: ' + e.message);
-  } finally {
-    setLoading(false);
-  }
-}
-
-async function loadImpactGraph() {
-  const fn = selectedNodeId && selectedNodeId.startsWith('func:')
-    ? selectedNodeId.replace('func:', '')
-    : prompt('Enter function path for impact analysis:');
-  if (!fn) return;
-  setLoading(true);
-  try {
-    const resp = await fetch(`${baseHost}/graph/${encodeURIComponent(projectId)}/impact/${encodeURIComponent(fn)}`);
-    if (!resp.ok) throw new Error(await resp.text());
-    const data = await resp.json();
-    allNodes = data.nodes || [];
-    allLinks = data.links || [];
-    impactMode = true;
-    updateStats(data.stats);
-    buildLegend(data.nodes);
-    render();
-  } catch (e) {
-    alert('Failed to load impact graph: ' + e.message);
-  } finally {
-    setLoading(false);
-  }
-}
-
-/* -------------------- Rendering -------------------- */
-function getVisibleData() {
-  const nodeSet = new Set();
-  const visibleNodes = allNodes.filter(n => {
-    if (n.type === 'feature' && activeLayers.has('feature')) { nodeSet.add(n.id); return true; }
-    if (n.type === 'function' && activeLayers.has('function')) { nodeSet.add(n.id); return true; }
-    return false;
-  });
-  const visibleLinks = allLinks.filter(l => {
-    const t = l.type;
-    if (t === 'feature_dep' && !activeLayers.has('feature_dep')) return false;
-    if (t === 'calls' && !activeLayers.has('calls')) return false;
-    if (t === 'belongs_to' && !activeLayers.has('belongs_to')) return false;
-    return nodeSet.has(l.source.id || l.source) && nodeSet.has(l.target.id || l.target);
-  });
-  return { nodes: visibleNodes, links: visibleLinks, nodeSet };
-}
-
-function render() {
-  if (simulation) { simulation.stop(); }
+function renderGraph() {
+  if (simulation) simulation.stop();
   gLinks.selectAll('*').remove();
   gNodes.selectAll('*').remove();
+  gLabels.selectAll('*').remove();
 
-  const { nodes, links } = getVisibleData();
-  if (!nodes.length) return;
-
-  // Build adjacency for highlight
-  const neighbor = new Map();
-  nodes.forEach(n => neighbor.set(n.id, new Set()));
-  links.forEach(l => {
-    const s = l.source.id || l.source;
-    const t = l.target.id || l.target;
-    neighbor.get(s).add(t);
-    neighbor.get(t).add(s);
+  const allNodes = graphData.nodes || [];
+  const rawEdges = graphData.edges || [];
+  
+  // Process edges
+  const allEdges = rawEdges.map(e => ({
+    source: typeof e.source === 'object' ? e.source.id : e.source,
+    target: typeof e.target === 'object' ? e.target.id : e.target,
+    type: e.type
+  })).filter(e => {
+    const nodeIds = new Set(allNodes.map(n => n.id));
+    return nodeIds.has(e.source) && nodeIds.has(e.target);
   });
 
-  // Simulation
-  simulation = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(links).id(d => d.id).distance(d => d.type === 'belongs_to' ? 35 : d.type === 'feature_dep' ? 120 : 80))
-    .force('charge', d3.forceManyBody().strength(d => d.type === 'feature' ? -600 : -250))
-    .force('center', d3.forceCenter(width() / 2, height() / 2))
-    .force('collide', d3.forceCollide().radius(d => d.type === 'feature' ? 28 : 14).iterations(2));
+  if (!allNodes.length) {
+    gNodes.append('text')
+      .attr('x', width() / 2)
+      .attr('y', height() / 2)
+      .attr('text-anchor', 'middle')
+      .attr('fill', 'var(--text-muted)')
+      .style('font-size', '14px')
+      .text('No nodes to display');
+    return;
+  }
 
-  // Links
-  const linkSel = gLinks.selectAll('line')
-    .data(links)
-    .join('line')
-    .attr('stroke', d => {
-      if (d.type === 'feature_dep') return 'rgba(255,255,255,0.25)';
-      if (d.type === 'calls') return 'rgba(0,242,195,0.35)';
-      return 'rgba(255,255,255,0.08)';
-    })
-    .attr('stroke-width', d => d.type === 'feature_dep' ? 2 : d.type === 'calls' ? 1.5 : 0.5)
-    .attr('stroke-dasharray', d => d.type === 'belongs_to' ? '3,3' : null);
+  // Group nodes by module for better layout
+  const modules = {};
+  allNodes.forEach(n => {
+    if (n.type === 'module') {
+      modules[n.id] = { x: 0, y: 0, count: 0 };
+    }
+  });
+  
+  // Count functions per module
+  allEdges.forEach(e => {
+    if (e.type === 'belongs_to') {
+      const func = allNodes.find(n => n.id === e.source);
+      const mod = allNodes.find(n => n.id === e.target);
+      if (func && mod && mod.type === 'module') {
+        if (!modules[mod.id]) modules[mod.id] = { x: 0, y: 0, count: 0 };
+        modules[mod.id].count++;
+      }
+    }
+  });
+  
+  // Auto-collapse modules with > 5 functions on first load
+  Object.keys(modules).forEach(modId => {
+    if (modules[modId].count > 5 && moduleStates[modId] === undefined) {
+      moduleStates[modId] = 'collapsed';
+    }
+  });
+  
+  // Filter visible nodes based on module state
+  const visibleNodes = allNodes.filter(n => {
+    if (n.type === 'module') return true;
+    // Find which module this node belongs to
+    const modEdge = allEdges.find(e => e.type === 'belongs_to' && e.source === n.id);
+    if (modEdge && moduleStates[modEdge.target] === 'collapsed') {
+      return false; // Hide function nodes in collapsed modules
+    }
+    return true;
+  });
+  
+  // Filter visible edges - hide belongs_to edges for collapsed modules
+  const visibleEdges = allEdges.filter(e => {
+    if (e.type === 'belongs_to') {
+      if (moduleStates[e.target] === 'collapsed') return false;
+    }
+    const nodeIds = new Set(visibleNodes.map(n => n.id));
+    return nodeIds.has(e.source) && nodeIds.has(e.target);
+  });
+  
+  // Distribute modules in a circle
+  const moduleIds = Object.keys(modules);
+  const centerX = width() / 2;
+  const centerY = height() / 2;
+  const radius = Math.min(width(), height()) * 0.35;
+  moduleIds.forEach((modId, i) => {
+    const angle = (2 * Math.PI * i) / Math.max(moduleIds.length, 1);
+    modules[modId].x = centerX + radius * Math.cos(angle);
+    modules[modId].y = centerY + radius * Math.sin(angle);
+  });
 
-  // Node groups
-  const nodeSel = gNodes.selectAll('g')
-    .data(nodes)
-    .join('g')
-    .call(d3.drag()
-      .on('start', (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
-      .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
-      .on('end', (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; }))
-    .on('click', (e, d) => { e.stopPropagation(); selectNode(d, neighbor); })
-    .on('mouseover', (e, d) => showTooltip(e, d))
-    .on('mouseout', hideTooltip);
-
-  // Feature node: rounded rect
-  nodeSel.each(function(d) {
-    const g = d3.select(this);
-    if (d.type === 'feature') {
-      g.append('rect')
-        .attr('width', d.name.length * 7 + 28)
-        .attr('height', 28)
-        .attr('x', d => -(d.name.length * 7 + 28) / 2)
-        .attr('y', -14)
-        .attr('rx', 6)
-        .attr('ry', 6)
-        .attr('fill', d.color || '#555')
-        .attr('stroke', 'rgba(255,255,255,0.2)')
-        .attr('stroke-width', 1)
-        .attr('filter', 'url(#glow)');
-      g.append('text')
-        .attr('dy', '0.35em')
-        .attr('text-anchor', 'middle')
-        .attr('fill', '#fff')
-        .style('font-size', '11px')
-        .style('font-weight', '700')
-        .text(d.name);
-      g.append('circle')
-        .attr('cx', d => (d.name.length * 7 + 28) / 2 - 10)
-        .attr('cy', -14 + 14)
-        .attr('r', 9)
-        .attr('fill', 'rgba(255,255,255,0.12)')
-        .attr('stroke', 'rgba(255,255,255,0.25)')
-        .attr('stroke-width', 1);
-      g.append('text')
-        .attr('x', d => (d.name.length * 7 + 28) / 2 - 10)
-        .attr('y', -14 + 14)
-        .attr('dy', '0.35em')
-        .attr('text-anchor', 'middle')
-        .attr('fill', '#fff')
-        .style('font-size', '9px')
-        .text(d.function_count || 0);
-    } else {
-      // Function node: circle with accent ring
-      g.append('circle')
-        .attr('r', 8)
-        .attr('fill', d.feature_color || '#888')
-        .attr('stroke', 'rgba(255,255,255,0.2)')
-        .attr('stroke-width', 1)
-        .attr('filter', 'url(#glow)');
-      g.append('text')
-        .attr('dy', '0.35em')
-        .attr('text-anchor', 'middle')
-        .attr('fill', '#fff')
-        .style('font-size', '9px')
-        .style('opacity', 0.9)
-        .text(d.name.length > 18 ? d.name.slice(0, 16) + '..' : d.name)
-        .attr('y', 18);
+  // Restore cached positions for smooth transitions
+  visibleNodes.forEach(n => {
+    if (nodePositions[n.id]) {
+      n.x = nodePositions[n.id].x;
+      n.y = nodePositions[n.id].y;
+    }
+    // Apply initial "explosion" velocity if present
+    if (n.vx && (Math.abs(n.vx) > 0.1 || Math.abs(n.vy) > 0.1)) {
+      n.x += n.vx * 3;
+      n.y += n.vy * 3;
+      n.vx *= 0.7; // Dampen
+      n.vy *= 0.7;
     }
   });
 
+  // Simulation - improved physics with module clustering
+  simulation = d3.forceSimulation(visibleNodes)
+    .force('link', d3.forceLink(visibleEdges).id(d => d.id).distance(d => {
+      if (d.type === 'belongs_to') return 60;
+      return 120;
+    }).strength(0.5))
+    .force('charge', d3.forceManyBody().strength(d => {
+      if (d.type === 'module') return -800;
+      return -300;
+    }).distanceMax(400))
+    .force('center', d3.forceCenter(centerX, centerY).strength(0.03))
+    .force('collide', d3.forceCollide().radius(d => getNodeRadius(d) + 8).iterations(4).strength(0.7))
+    .force('moduleX', d3.forceX(d => {
+      if (d.type !== 'function' && d.type !== 'method') return centerX;
+      const modEdge = allEdges.find(e => e.type === 'belongs_to' && e.source === d.id);
+      if (modEdge && modules[modEdge.target]) return modules[modEdge.target].x;
+      return centerX;
+    }).strength(0.08))
+    .force('moduleY', d3.forceY(d => {
+      if (d.type !== 'function' && d.type !== 'method') return centerY;
+      const modEdge = allEdges.find(e => e.type === 'belongs_to' && e.source === d.id);
+      if (modEdge && modules[modEdge.target]) return modules[modEdge.target].y;
+      return centerY;
+    }).strength(0.08))
+    .alphaDecay(0.02)
+    .velocityDecay(0.4)
+    .alphaMin(0.001);
+
+  if (!physicsEnabled) simulation.stop();
+
+  // Links
+  const linkElements = gLinks.selectAll('line')
+    .data(visibleEdges)
+    .join('line')
+    .attr('stroke', d => {
+      const src = visibleNodes.find(n => n.id === d.source);
+      return (colors[src?.type] || '#999') + '60';
+    })
+    .attr('stroke-width', 1.5)
+    .attr('stroke-opacity', 0.5);
+
+  // Nodes
+  const nodeGroups = gNodes.selectAll('g.node')
+    .data(visibleNodes)
+    .join('g')
+    .attr('class', 'node')
+    .call(d3.drag()
+      .on('start', (e, d) => {
+        if (!e.active && physicsEnabled) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+      })
+      .on('drag', (e, d) => {
+        d.fx = e.x;
+        d.fy = e.y;
+      })
+      .on('end', (e, d) => {
+        if (!e.active && physicsEnabled) simulation.alphaTarget(0);
+        d.fx = null;
+        d.fy = null;
+      }))
+    .on('click', (e, d) => {
+      e.stopPropagation();
+      // If it's a module with collapsed functions, toggle expand/collapse
+      if (d.type === 'module' && modules[d.id] && modules[d.id].count > 5) {
+        toggleModule(d.id);
+      } else {
+        onNodeClick(d);
+      }
+    })
+    .attr('class', d => {
+      const isExpandable = d.type === 'module' && modules[d.id] && modules[d.id].count > 5;
+      return 'node' + (isExpandable ? ' node-expandable' : '');
+    })
+    .on('mouseenter', (e, d) => {
+      highlightNode(d);
+      showInspector(d);
+    })
+    .on('mouseleave', () => {
+      unhighlightNode();
+    });
+
+  // Node circles — Agar.io / Obsidian style
+  nodeGroups.each(function(d) {
+    const g = d3.select(this);
+    const color = colors[d.type] || '#888';
+    const r = getNodeRadius(d);
+    const modInfo = d.type === 'module' ? modules[d.id] : null;
+    const isCollapsed = modInfo && moduleStates[d.id] === 'collapsed';
+    
+    if (isCollapsed && modInfo.count > 1) {
+      // ========================================
+      // AGAR.IO STYLE BLOB (collapsed module)
+      // ========================================
+      
+      // Outer pulsing glow
+      g.append('circle')
+        .attr('r', r + 8)
+        .attr('fill', color)
+        .attr('opacity', 0.06)
+        .attr('class', 'node-blob-glow');
+      
+      // Second glow ring
+      g.append('circle')
+        .attr('r', r + 3)
+        .attr('fill', color)
+        .attr('opacity', 0.12)
+        .attr('class', 'node-blob-glow')
+        .style('animation-delay', '1.5s');
+      
+      // Main blob body — opacity increases with mass
+      const fillOpacity = Math.min(0.35, 0.12 + modInfo.count * 0.008);
+      g.append('circle')
+        .attr('r', r)
+        .attr('fill', color)
+        .attr('opacity', fillOpacity)
+        .attr('class', 'node-blob-body');
+      
+      // Membrane (outer edge)
+      g.append('circle')
+        .attr('r', r)
+        .attr('fill', 'none')
+        .attr('stroke', color)
+        .attr('stroke-width', 2.5)
+        .attr('opacity', 0.5);
+      
+      // Inner membrane ring
+      g.append('circle')
+        .attr('r', r * 0.7)
+        .attr('fill', 'none')
+        .attr('stroke', color)
+        .attr('stroke-width', 1)
+        .attr('opacity', 0.25);
+      
+      // "Food" dots inside — representing absorbed functions
+      const numDots = Math.min(modInfo.count, 25);
+      const dotSeed = d.id.length; // deterministic pseudo-random
+      for (let i = 0; i < numDots; i++) {
+        const angle = ((2 * Math.PI * i) / numDots) + (dotSeed * 0.1);
+        const dist = r * (0.25 + ((i * 137.5) % 100) / 200); // golden angle distribution
+        const dotR = 1.2 + ((i * 7) % 5) * 0.4;
+        g.append('circle')
+          .attr('cx', dist * Math.cos(angle))
+          .attr('cy', dist * Math.sin(angle))
+          .attr('r', dotR)
+          .attr('fill', color)
+          .attr('opacity', 0.35 + ((i * 3) % 4) * 0.12);
+      }
+      
+      // Central nucleus
+      g.append('circle')
+        .attr('r', r * 0.2)
+        .attr('fill', color)
+        .attr('opacity', 0.6);
+      
+      // Mass count in center
+      g.append('text')
+        .attr('text-anchor', 'middle')
+        .attr('dy', '0.35em')
+        .attr('fill', '#fff')
+        .style('font-size', Math.min(16, r * 0.45) + 'px')
+        .style('font-weight', '700')
+        .style('pointer-events', 'none')
+        .style('text-shadow', '0 1px 3px rgba(0,0,0,0.3)')
+        .text(modInfo.count);
+        
+    } else {
+      // ========================================
+      // NORMAL NODE (or expanded module)
+      // ========================================
+      
+      // Glow
+      g.append('circle')
+        .attr('r', r + 3)
+        .attr('fill', color)
+        .attr('opacity', 0.1)
+        .attr('class', 'node-glow');
+      
+      // Main circle
+      g.append('circle')
+        .attr('r', r)
+        .attr('fill', 'var(--bg)')
+        .attr('stroke', color)
+        .attr('stroke-width', 2)
+        .attr('class', 'node-main');
+      
+      // Center dot
+      g.append('circle')
+        .attr('r', r * 0.3)
+        .attr('fill', color)
+        .attr('opacity', 0.7)
+        .attr('class', 'node-dot');
+    }
+    
+    // Selection ring (hidden by default) — applies to both
+    g.append('circle')
+      .attr('r', r + 4)
+      .attr('fill', 'none')
+      .attr('stroke', color)
+      .attr('stroke-width', 0)
+      .attr('opacity', 0.6)
+      .attr('class', 'node-select');
+  });
+
+  // Labels
+  const labels = gLabels.selectAll('text')
+    .data(visibleNodes)
+    .join('text')
+    .attr('text-anchor', 'middle')
+    .attr('dy', d => getNodeRadius(d) + 12)
+    .attr('fill', 'var(--text)')
+    .style('font-size', '10px')
+    .style('font-weight', '500')
+    .style('font-family', 'var(--font-ui)')
+    .style('pointer-events', 'none')
+    .style('opacity', d => shouldShowLabel(d, visibleNodes.length) ? 0.85 : 0)
+    .text(d => truncate(d.label || d.name, 18));
+
+  // Tick
   simulation.on('tick', () => {
-    linkSel
-      .attr('x1', d => d.source.x)
-      .attr('y1', d => d.source.y)
-      .attr('x2', d => d.target.x)
-      .attr('y2', d => d.target.y);
-    nodeSel.attr('transform', d => `translate(${d.x},${d.y})`);
+    linkElements
+      .attr('x1', d => {
+        const n = visibleNodes.find(n => n.id === d.source);
+        return n ? n.x : 0;
+      })
+      .attr('y1', d => {
+        const n = visibleNodes.find(n => n.id === d.source);
+        return n ? n.y : 0;
+      })
+      .attr('x2', d => {
+        const n = visibleNodes.find(n => n.id === d.target);
+        return n ? n.x : 0;
+      })
+      .attr('y2', d => {
+        const n = visibleNodes.find(n => n.id === d.target);
+        return n ? n.y : 0;
+      });
+
+    nodeGroups.attr('transform', d => `translate(${d.x || 0},${d.y || 0})`);
+    labels.attr('x', d => d.x || 0).attr('y', d => d.y || 0);
+    
+    // Cache positions for smooth transitions on re-render
+    visibleNodes.forEach(n => {
+      if (n.x !== undefined && n.y !== undefined) {
+        nodePositions[n.id] = { x: n.x, y: n.y };
+      }
+    });
   });
+
+  // Update legend
+  renderLegend(visibleNodes);
 }
 
-/* -------------------- Interactions -------------------- */
-function selectNode(d, neighbor) {
-  selectedNodeId = d.id;
-  const ne = neighbor.get(d.id);
-  gNodes.selectAll('g').style('opacity', n => (n.id === d.id || ne.has(n.id)) ? 1 : 0.15);
-  gLinks.selectAll('line').style('opacity', l => {
-    const s = l.source.id || l.source;
-    const t = l.target.id || l.target;
-    return (s === d.id || t === d.id) ? 1 : 0.05;
-  });
-
-  const ins = document.getElementById('inspector');
-  ins.style.display = 'block';
-  document.getElementById('inName').textContent = d.full_name || d.name;
-  document.getElementById('inType').textContent = d.type;
-  document.getElementById('inFeature').textContent = d.feature || d.name;
-  let extra = [];
-  if (d.type === 'feature') {
-    extra.push(`Functions: ${d.function_count}`);
-    extra.push(`Dependencies: ${(d.dependencies || []).join(', ') || 'none'}`);
-  } else {
-    extra.push(`File: ${d.file_path || 'unknown'}`);
-    extra.push(`Line: ${d.line || '-'}`);
-    if (d.docstring) extra.push(`Description: ${d.docstring}`);
-  }
-  document.getElementById('inExtra').textContent = extra.join('\n');
-}
-
-svg && svg.on && svg.on('click', () => {
-  selectedNodeId = null;
-  gNodes.selectAll('g').style('opacity', 1);
-  gLinks.selectAll('line').style('opacity', 1);
-  document.getElementById('inspector').style.display = 'none';
-});
-
-function showTooltip(e, d) {
-  const t = document.getElementById('tooltip');
-  let html = `<strong>${d.name}</strong><span class="tag">${d.type}</span><br/>`;
-  if (d.type === 'function') {
-    html += `<span style="color:var(--muted)">${d.full_name || ''}</span><br/>`;
-    html += `Feature: ${d.feature || 'unknown'}<br/>`;
-    html += `File: ${d.file_path || 'unknown'}:${d.line || '-'}`;
-  } else {
-    html += `${d.function_count || 0} functions`;
-  }
-  t.innerHTML = html;
-  t.style.opacity = 1;
-  moveTooltip(e);
-}
-
-function moveTooltip(e) {
-  const t = document.getElementById('tooltip');
-  const rect = document.getElementById('graph-wrap').getBoundingClientRect();
-  let x = e.clientX - rect.left + 14;
-  let y = e.clientY - rect.top + 14;
-  if (x + 280 > rect.width) x -= 300;
-  if (y + 120 > rect.height) y -= 140;
-  t.style.left = x + 'px';
-  t.style.top = y + 'px';
-}
-
-function hideTooltip() {
-  document.getElementById('tooltip').style.opacity = 0;
-}
-
-/* -------------------- Controls -------------------- */
-function toggleLayer(type) {
-  if (activeLayers.has(type)) activeLayers.delete(type); else activeLayers.add(type);
-  updatePills();
-  render();
-}
-
-function toggleImpactMode() {
-  const btn = document.getElementById('btnImpact');
-  if (!impactMode) {
-    loadImpactGraph();
-    btn.textContent = 'Back to Full';
-    btn.style.borderColor = 'var(--accent)';
-  } else {
-    loadGraph();
-    btn.textContent = 'Impact Mode';
-    btn.style.borderColor = '';
-  }
-}
-
-function resetZoom() {
-  svg.transition().duration(500).call(
-    d3.zoom().transform,
-    d3.zoomIdentity
-  );
-  if (simulation) simulation.alpha(0.3).restart();
-}
-
-function setLoading(v) {
-  document.getElementById('loader').classList.toggle('visible', v);
-}
-
-function updateStats(s) {
-  document.getElementById('stFeat').textContent = s.total_features ?? 0;
-  document.getElementById('stFunc').textContent = s.total_functions ?? 0;
-  document.getElementById('stLinks').textContent = s.total_links ?? 0;
-}
-
-function buildLegend(nodes) {
-  const colors = new Map();
-  nodes.forEach(n => {
-    if (n.type === 'feature') colors.set(n.name, n.color);
-  });
-  const el = document.getElementById('legend');
-  el.innerHTML = '';
-  colors.forEach((color, name) => {
-    const item = document.createElement('div');
-    item.className = 'legend-item';
-    item.innerHTML = `<div class="dot" style="background:${color}"></div>${name}`;
-    el.appendChild(item);
-  });
-}
-
-function updatePills() {
-  const map = {
-    'feature': 'pillFeatures',
-    'function': 'pillFunctions',
-    'feature_dep': 'pillDeps',
-    'calls': 'pillCalls',
-  };
-  for (const [k, id] of Object.entries(map)) {
-    document.getElementById(id).classList.toggle('active', activeLayers.has(k));
-  }
-}
-
-/* -------------------- Project Info Panel -------------------- */
-function updateProjectInfoPanel(data) {
-  const statusEl = document.getElementById('projectInfoStatus');
-  const featEl = document.getElementById('projectInfoFeatures');
-
-  if (data.status === 'ok') {
-    statusEl.textContent = `${data.features.length} features, ${data.total_functions || 0} functions`;
-    statusEl.style.color = 'var(--accent)';
-    featEl.innerHTML = data.features.slice(0, 8).map(f => `<div style="margin:2px 0">• ${f}</div>`).join('');
-    if (data.features.length > 8) featEl.innerHTML += `<div>+ ${data.features.length - 8} more</div>`;
-  } else {
-    statusEl.textContent = 'No project data. Sync a repository first.';
-    statusEl.style.color = 'var(--muted)';
-    featEl.innerHTML = '';
-  }
-}
-
-/* -------------------- Spec Panel -------------------- */
-let currentSpecContent = '';
-
-async function loadSpec() {
-  try {
-    const resp = await fetch(`${baseHost}/spec/${encodeURIComponent(projectId)}`);
-    if (!resp.ok) throw new Error(await resp.text());
-    const data = await resp.json();
-    updateSpecPanel(data);
-    return data;
-  } catch (e) {
-    console.error('Failed to load spec:', e);
-    document.getElementById('specStatus').textContent = 'Error loading spec';
-    document.getElementById('specStatus').style.color = 'var(--danger)';
-  }
-}
-
-function updateSpecPanel(data) {
-  const statusEl = document.getElementById('specStatus');
-  const previewEl = document.getElementById('specPreview');
+function toggleModule(moduleId) {
+  const modNode = graphData.nodes.find(n => n.id === moduleId);
+  if (!modNode) return;
   
-  if (data.status === 'ok') {
-    statusEl.textContent = 'Spec: Found';
-    statusEl.style.color = 'var(--accent)';
-    currentSpecContent = data.content;
-    // Show a preview of the overview
-    const overview = data.overview || data.content.substring(0, 200) + '...';
-    previewEl.innerHTML = overview.replace(/\n/g, '<br>');
+  const wasCollapsed = moduleStates[moduleId] === 'collapsed';
+  
+  if (wasCollapsed) {
+    // === EXPANDING: "Split" the blob - children explode outward ===
+    moduleStates[moduleId] = 'expanded';
+    
+    // Find all children that will appear
+    const children = graphData.nodes.filter(n => {
+      const edge = graphData.edges.find(e => 
+        (e.type === 'belongs_to' || e.type === 'belongs to') && e.source === n.id && e.target === moduleId
+      );
+      return edge;
+    });
+    
+    // Place children at parent's center (inside the blob before explosion)
+    const px = modNode.x || width() / 2;
+    const py = modNode.y || height() / 2;
+    
+    children.forEach((child, i) => {
+      // Stack them at center with tiny offset so collision pushes them apart
+      nodePositions[child.id] = { 
+        x: px + (Math.random() - 0.5) * 10, 
+        y: py + (Math.random() - 0.5) * 10 
+      };
+      // Give each child an outward "explosion" velocity
+      const angle = (2 * Math.PI * i) / Math.max(children.length, 1);
+      const speed = 2 + Math.random() * 3;
+      child.vx = Math.cos(angle) * speed;
+      child.vy = Math.sin(angle) * speed;
+    });
+    
+    updateStatus(`Expanding ${modNode.label || modNode.name} — ${children.length} functions`);
+    
   } else {
-    statusEl.textContent = 'Spec: Not found';
-    statusEl.style.color = 'var(--warn)';
-    currentSpecContent = data.content || '';
-    previewEl.innerHTML = `<div style="font-style:italic">No project.md found. Click Edit Spec to create one.</div>
-      <div style="margin-top:4px;color:var(--accent)">${data.hint || ''}</div>`;
+    // === COLLAPSING: "Absorb" children back into the blob ===
+    moduleStates[moduleId] = 'collapsed';
+    
+    // Find children that are being absorbed
+    const children = graphData.nodes.filter(n => {
+      const edge = graphData.edges.find(e => 
+        (e.type === 'belongs_to' || e.type === 'belongs to') && e.source === n.id && e.target === moduleId
+      );
+      return edge;
+    });
+    
+    updateStatus(`Collapsed ${modNode.label || modNode.name} — absorbed ${children.length} functions`);
+  }
+  
+  renderGraph();
+  
+  // Restore selection if the selected node is still visible
+  if (currentNode) {
+    const stillVisible = graphData.nodes.find(n => n.id === currentNode.id);
+    if (stillVisible) {
+      selectNodeById(currentNode.id);
+    } else {
+      clearEditor();
+    }
   }
 }
 
-function openSpecEditor() {
-  const modal = document.getElementById('specModal');
-  const editor = document.getElementById('specEditor');
-  editor.value = currentSpecContent || '';
-  modal.style.display = 'flex';
+function renderLegend(nodes) {
+  const container = document.getElementById('legend-items');
+  if (!container) return;
+  
+  // Get unique types from current nodes
+  const types = [...new Set(nodes.map(n => n.type))].sort();
+  
+  const typeLabels = {
+    feature: 'Feature',
+    function: 'Function',
+    method: 'Method',
+    class: 'Class',
+    note: 'Note',
+    decision: 'Decision',
+    module: 'Module',
+    code_note: 'Code Note'
+  };
+  
+  container.innerHTML = types.map(type => {
+    const color = colors[type] || '#888';
+    const label = typeLabels[type] || type;
+    return `
+      <div class="legend-item">
+        <div class="legend-dot ${type}" style="border-color: ${color}"></div>
+        <span>${label}</span>
+      </div>
+    `;
+  }).join('');
 }
 
-function closeSpecEditor() {
-  document.getElementById('specModal').style.display = 'none';
+function getNodeRadius(d) {
+  const sizes = { feature: 14, module: 12, class: 10, note: 10, decision: 10, function: 7, method: 7, code_note: 7 };
+  const baseSize = sizes[d.type] || 8;
+  
+  // Make collapsed modules larger based on child count (agar.io style)
+  if (d.type === 'module' && moduleStates[d.id] === 'collapsed') {
+    const childCount = graphData.edges.filter(e => 
+      e.type === 'belongs_to' && e.target === d.id
+    ).length;
+    // Scale from 14 to 35 based on child count
+    // Small cluster (5-10): 14-20px
+    // Medium cluster (10-20): 20-28px  
+    // Large cluster (20-50): 28-35px
+    return Math.min(35, 14 + Math.sqrt(childCount) * 3.5);
+  }
+  
+  return baseSize;
 }
 
-async function saveSpec() {
-  const content = document.getElementById('specEditor').value.trim();
-  if (!content) {
-    alert('Spec content cannot be empty');
+function shouldShowLabel(d, total) {
+  if (total < 40) return true;
+  return ['feature', 'module', 'note', 'decision'].includes(d.type);
+}
+
+function updateLabelVisibility() {
+  if (!gLabels) return;
+  const threshold = 0.5;
+  gLabels.selectAll('text').style('opacity', d => {
+    if (currentZoom > threshold) return 0.85;
+    return ['feature', 'module'].includes(d.type) ? 0.85 : 0;
+  });
+}
+
+function truncate(text, len) {
+  if (!text) return '';
+  return text.length > len ? text.substring(0, len - 2) + '..' : text;
+}
+
+// === Highlighting ===
+function highlightNode(d) {
+  if (!gNodes || !gLinks) return;
+  
+  // Dim all nodes
+  gNodes.selectAll('.node-main').attr('opacity', 0.25);
+  gNodes.selectAll('.node-glow').attr('opacity', 0);
+  gNodes.selectAll('.node-blob-body').attr('opacity', 0.15);
+  gNodes.selectAll('.node-blob-glow').attr('opacity', 0.03);
+  gLinks.selectAll('line').attr('stroke-opacity', 0.1);
+  
+  // Highlight selected node
+  const selected = gNodes.filter(n => n.id === d.id);
+  selected.selectAll('.node-main').attr('opacity', 1).attr('stroke-width', 3);
+  selected.selectAll('.node-glow').attr('opacity', 0.3);
+  selected.selectAll('.node-blob-body').attr('opacity', function() {
+    const data = d3.select(this.parentNode).datum();
+    if (data && data.type === 'module' && moduleStates[data.id] === 'collapsed') {
+      const childCount = graphData.edges.filter(e => 
+        e.type === 'belongs_to' && e.target === data.id
+      ).length;
+      return Math.min(0.35, 0.12 + childCount * 0.008);
+    }
+    return 0.3;
+  });
+  selected.selectAll('.node-blob-glow').attr('opacity', 0.12);
+  
+  // Highlight connected nodes and edges
+  const connected = new Set();
+  gLinks.each(function(l) {
+    if (l.source === d.id || l.target === d.id) {
+      connected.add(l.source);
+      connected.add(l.target);
+      d3.select(this).attr('stroke-opacity', 0.6).attr('stroke-width', 1.5);
+    }
+  });
+  
+  // Dim connected nodes slightly less
+  gNodes.filter(n => connected.has(n.id) && n.id !== d.id)
+    .selectAll('.node-main, .node-blob-body').attr('opacity', 0.7);
+}
+
+function unhighlightNode() {
+  if (!gNodes || !gLinks) return;
+  // Reset normal nodes
+  gNodes.selectAll('.node-main').attr('opacity', 1).attr('stroke-width', 2);
+  gNodes.selectAll('.node-glow').attr('opacity', 0.1);
+  // Reset blob nodes
+  gNodes.selectAll('.node-blob-body').attr('opacity', function() {
+    // Restore original opacity based on data
+    const d = d3.select(this.parentNode).datum();
+    if (d && d.type === 'module' && moduleStates[d.id] === 'collapsed') {
+      const childCount = graphData.edges.filter(e => 
+        e.type === 'belongs_to' && e.target === d.id
+      ).length;
+      return Math.min(0.35, 0.12 + childCount * 0.008);
+    }
+    return 0.1;
+  });
+  gNodes.selectAll('.node-blob-glow').attr('opacity', 0.06);
+  // Reset links
+  gLinks.selectAll('line').attr('stroke-opacity', 0.5).attr('stroke-width', 1.5);
+}
+
+// === Node Interaction ===
+function onNodeClick(d) {
+  currentNode = d;
+  selectNodeById(d.id);
+}
+
+function selectNodeById(nodeId) {
+  const node = graphData.nodes.find(n => n.id === nodeId);
+  if (!node) return;
+  
+  currentNode = node;
+  
+  // Update editor
+  document.getElementById('editor-title').textContent = node.label || node.name;
+  document.getElementById('editor-type-badge').textContent = (typeLabels[node.type] || node.type).toUpperCase();
+  document.getElementById('editor-type-badge').style.color = colors[node.type] || '#888';
+  
+  // Show code details if code node
+  const codeDetails = document.getElementById('code-details');
+  if (node.file_path) {
+    codeDetails.classList.add('visible');
+    document.getElementById('code-type').textContent = typeLabels[node.type] || node.type;
+    document.getElementById('code-file').textContent = node.file_path;
+    document.getElementById('code-line').textContent = node.line || '-';
+    document.getElementById('code-signature').textContent = node.signature || 'No signature available';
+  } else {
+    codeDetails.classList.remove('visible');
+  }
+  
+  // Load content
+  loadNodeContent(node);
+  
+  // Update inspector
+  showInspector(node);
+  
+  // Update selection indicator
+  if (gNodes) {
+    gNodes.selectAll('.node-select').attr('stroke-width', 0);
+    const selected = gNodes.filter(n => n.id === nodeId);
+    selected.selectAll('.node-select').attr('stroke-width', 2);
+  }
+  
+  // Update backlinks in explorer if doc mode
+  if (currentView === 'docs') {
+    updateBacklinks(node.id);
+  }
+}
+
+function loadNodeContent(node) {
+  const input = document.getElementById('editor-input');
+  const preview = document.getElementById('editor-preview');
+  
+  // If impact tab is active, run impact analysis instead
+  if (editorTab === 'impact' && currentView === 'code' && 
+      (node.type === 'function' || node.type === 'method' || node.type === 'class')) {
+    analyzeImpact();
     return;
   }
   
-  setLoading(true);
-  try {
-    const resp = await fetch(`${baseHost}/spec/${encodeURIComponent(projectId)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
-    });
-    if (!resp.ok) throw new Error(await resp.text());
-    const data = await resp.json();
-    alert(data.message);
-    closeSpecEditor();
-    await loadSpec();
-  } catch (e) {
-    alert('Failed to save spec: ' + e.message);
-  } finally {
-    setLoading(false);
+  if (currentView === 'code') {
+    // For code nodes, show details + editable notes
+    if (node.type === 'function' || node.type === 'method') {
+      const content = generateFunctionDoc(node);
+      input.value = content;
+    } else if (node.type === 'class') {
+      input.value = generateClassDoc(node);
+    } else {
+      input.value = node.content || '';
+    }
+  } else {
+    // For doc nodes, show markdown content
+    input.value = node.content || `# ${node.label || node.name}\n\nAdd details here...`;
+  }
+  
+  updatePreview();
+}
+
+function generateFunctionDoc(node) {
+  const sig = node.signature || 'No signature available';
+  return `## ${node.label || node.name}
+
+**Type:** ${typeLabels[node.type] || node.type}
+**File:** ${node.file_path || 'N/A'}
+**Line:** ${node.line || 'N/A'}
+
+### Signature
+
+\`\`\`python
+${sig}
+\`\`\`
+
+### Description
+
+Add description here...
+
+### Parameters
+
+- param1: description
+
+### Returns
+
+Description of return value...
+
+### Architecture Notes
+
+Add architectural considerations...
+
+### Divergence
+
+Current implementation vs intended design...
+
+### Related
+
+- [[README]]
+- @OtherFunction
+`;
+}
+
+function generateClassDoc(node) {
+  return `## ${node.label || node.name}
+
+**Type:** Class
+**File:** ${node.file_path || 'N/A'}
+**Line:** ${node.line || 'N/A'}
+
+### Description
+
+Add description here...
+
+### Responsibilities
+
+- Responsibility 1
+- Responsibility 2
+
+### Architecture Notes
+
+Add architectural considerations...
+
+### Divergence
+
+Current implementation vs intended design...
+`;
+}
+
+// === Inspector ===
+function showInspector(node) {
+  const inspector = document.getElementById('inspector');
+  if (!node) {
+    inspector.classList.remove('visible');
+    return;
+  }
+  
+  const color = colors[node.type] || '#888';
+  
+  document.getElementById('inspector-icon').style.color = color;
+  document.getElementById('inspector-name').textContent = node.label || node.name;
+  document.getElementById('inspector-type').textContent = typeLabels[node.type] || node.type;
+  document.getElementById('inspector-id').textContent = node.id;
+  
+  const fileRow = document.getElementById('inspector-file-row');
+  if (node.file_path) {
+    fileRow.style.display = 'flex';
+    document.getElementById('inspector-file').textContent = node.file_path;
+  } else {
+    fileRow.style.display = 'none';
+  }
+  
+  const lineRow = document.getElementById('inspector-line-row');
+  if (node.line) {
+    lineRow.style.display = 'flex';
+    document.getElementById('inspector-line').textContent = node.line;
+  } else {
+    lineRow.style.display = 'none';
+  }
+  
+  // Tags
+  const tagsContainer = document.getElementById('inspector-tags');
+  if (node.tags && node.tags.length) {
+    tagsContainer.innerHTML = '<div style="margin-top: 8px;">' + 
+      node.tags.map(t => `<span class="inspector-tag">${t}</span>`).join('') + 
+      '</div>';
+  } else {
+    tagsContainer.innerHTML = '';
+  }
+  
+  inspector.classList.add('visible');
+}
+
+// === Editor ===
+function switchEditorTab(tab) {
+  editorTab = tab;
+  document.querySelectorAll('.editor-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('tab-' + tab).classList.add('active');
+  
+  const input = document.getElementById('editor-input');
+  const preview = document.getElementById('editor-preview');
+  
+  if (tab === 'details') {
+    input.style.display = 'block';
+    preview.style.display = 'none';
+  } else if (tab === 'docs') {
+    input.style.display = 'block';
+    preview.style.display = 'none';
+    // Load doc content
+  } else if (tab === 'impact') {
+    input.style.display = 'none';
+    preview.style.display = 'block';
+    preview.innerHTML = '<div class="impact-panel"><div class="impact-title">Impact Analysis</div><div class="impact-item">Select a function and click Analyze Impact</div></div>';
   }
 }
 
-/* -------------------- Boot -------------------- */
-document.addEventListener('DOMContentLoaded', () => {
-  const params = new URLSearchParams(location.search);
-  const p = params.get('project_id');
-  if (p) document.getElementById('projectId').value = p;
-  initGraph();
-  updatePills();
-  loadGraph();
+function onEditorChange() {
+  if (editorTab === 'details') {
+    updatePreview();
+  }
+}
+
+function updatePreview() {
+  const content = document.getElementById('editor-input').value;
+  const preview = document.getElementById('editor-preview');
+  
+  let html = marked.parse(content);
+  
+  // Highlight wiki links
+  html = html.replace(/\[\[([^\]]+)\]\]/g, '<span class="wiki-link" onclick="openLinkedNote(\'$1\')">$1</span>');
+  
+  // Highlight mentions
+  html = html.replace(/@([a-zA-Z_][a-zA-Z0-9_\.]*)\b/g, '<span class="mention" onclick="openMention(\'$1\')">@$1</span>');
+  
+  // Highlight tags
+  html = html.replace(/#([a-zA-Z_][a-zA-Z0-9_]*)/g, '<span class="tag">#$1</span>');
+  
+  preview.innerHTML = html;
+}
+
+function clearEditor() {
+  document.getElementById('editor-title').textContent = 'Select a node';
+  document.getElementById('editor-input').value = '';
+  document.getElementById('editor-preview').innerHTML = '';
+  document.getElementById('code-details').classList.remove('visible');
+  document.getElementById('inspector').classList.remove('visible');
+  if (gNodes) {
+    gNodes.selectAll('.node-select').attr('stroke-width', 0);
+  }
+}
+
+// === Actions ===
+function editNode() {
+  if (!currentNode) return;
+  
+  if (currentView === 'code') {
+    // For code nodes, save as doc note
+    const noteId = 'func-' + (currentNode.name || currentNode.label).replace(/\./g, '-');
+    saveNote(noteId, document.getElementById('editor-input').value);
+  } else {
+    // For doc nodes, save directly
+    const noteId = currentNode.id.replace('note:', '');
+    saveNote(noteId, document.getElementById('editor-input').value);
+  }
+}
+
+async function analyzeImpact() {
+  if (!currentNode || currentView !== 'code') return;
+  
+  switchEditorTab('impact');
+  const preview = document.getElementById('editor-preview');
+  preview.innerHTML = '<div class="impact-panel"><div class="impact-title">Analyzing...</div></div>';
+  
+  try {
+    // Use qualified_name if available to disambiguate functions with same name in different classes
+    const symbolName = currentNode.qualified_name || currentNode.name || currentNode.label;
+    const resp = await fetch(`${baseHost}/feature/${projectId}/impact/${encodeURIComponent(symbolName)}`);
+    const data = await resp.json();
+    
+    // New API format: data.affected_functions_count, data.risk_level
+    // Fallback to old format for compatibility
+    const riskLevel = data.risk_level || (data.technical_impact || {}).risk_level || 'unknown';
+    const riskClass = riskLevel === 'high' ? 'impact-risk-high' : 
+                      riskLevel === 'medium' ? 'impact-risk-medium' : 'impact-risk-low';
+    
+    const affectedCount = data.affected_functions_count || (data.technical_impact || {}).affected_functions_count || 0;
+    const affected = data.affected_functions || (data.technical_impact || {}).affected_functions || [];
+    const featureImpacts = data.feature_impacts || [];
+    const divergence = data.divergence_warnings || [];
+    const pointers = data.development_pointers || [];
+    
+    let html = `<div class="impact-panel">
+      <div class="impact-title">Impact Analysis: ${currentNode.name || currentNode.label}</div>
+      <div class="impact-item">Risk Level: <strong class="${riskClass}">${riskLevel.toUpperCase()}</strong></div>
+      <div class="impact-item">Affected Functions: ${affectedCount}</div>
+      <div class="impact-item">Affected Files: ${data.affected_files_count || 0}</div>
+    </div>`;
+    
+    // Feature impacts
+    if (featureImpacts.length) {
+      html += `<div class="impact-panel">
+        <div class="impact-title">Feature Impacts (${featureImpacts.length})</div>`;
+      for (const fi of featureImpacts) {
+        html += `<div class="impact-item" style="margin-left: 8px; border-left: 2px solid var(--accent); padding-left: 8px;">
+          <strong>${fi.feature_name}</strong> — ${fi.impacted_functions?.length || 0} functions
+          ${fi.risk_flags?.length ? `<br><span style="color: var(--warn); font-size: 11px;">⚠ ${fi.risk_flags.join(', ')}</span>` : ''}
+        </div>`;
+      }
+      html += '</div>';
+    }
+    
+    // Affected functions list
+    if (affected.length) {
+      html += `<div class="impact-panel">
+        <div class="impact-title">Affected Functions (${affected.length})</div>`;
+      for (const func of affected.slice(0, 20)) {
+        const funcName = func.name || func.qualified_name || 'unknown';
+        html += `<div class="impact-item" style="font-family: var(--font-ui); font-size: 11px; cursor: pointer;" onclick="selectNodeById('func:${funcName}')">• ${funcName}</div>`;
+      }
+      if (affected.length > 20) {
+        html += `<div class="impact-item" style="font-size: 11px; color: var(--text-muted);">... and ${affected.length - 20} more</div>`;
+      }
+      html += '</div>';
+    }
+    
+    // Divergence warnings
+    if (divergence.length) {
+      html += `<div class="impact-panel">
+        <div class="impact-title">Divergence Warnings</div>`;
+      for (const warning of divergence) {
+        html += `<div class="impact-item" style="color: var(--warn);">⚠ ${warning}</div>`;
+      }
+      html += '</div>';
+    }
+    
+    // Development pointers
+    if (pointers.length) {
+      html += `<div class="impact-panel">
+        <div class="impact-title">Development Pointers</div>`;
+      for (const ptr of pointers) {
+        html += `<div class="impact-item">→ ${ptr}</div>`;
+      }
+      html += '</div>';
+    }
+    
+    preview.innerHTML = html;
+  } catch (e) {
+    console.error('Impact analysis error:', e);
+    preview.innerHTML = '<div class="impact-panel"><div class="impact-title">Error</div><div class="impact-item">Could not analyze impact: ' + e.message + '</div></div>';
+  }
+}
+
+async function saveNote(noteId, content) {
+  try {
+    const resp = await fetch(`${baseHost}/note/${projectId}/${noteId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, title: currentNode?.label || currentNode?.name || noteId })
+    });
+    
+    if (resp.ok) {
+      updateStatus('Saved: ' + noteId);
+      // Refresh doc graph if in doc mode
+      if (currentView === 'docs') {
+        loadDocGraph();
+      }
+    }
+  } catch (e) {
+    updateStatus('Error saving note');
+  }
+}
+
+let pendingDeleteNoteId = null;
+let pendingDeleteNoteTitle = null;
+
+function deleteNote(noteId, noteTitle) {
+  pendingDeleteNoteId = noteId;
+  pendingDeleteNoteTitle = noteTitle;
+  
+  const modal = document.getElementById('delete-modal');
+  const message = document.getElementById('delete-modal-message');
+  message.textContent = `Are you sure you want to delete "${noteTitle || noteId}"?`;
+  modal.style.display = 'flex';
+}
+
+function closeDeleteModal() {
+  document.getElementById('delete-modal').style.display = 'none';
+  pendingDeleteNoteId = null;
+  pendingDeleteNoteTitle = null;
+}
+
+// Close modal on click outside
+document.addEventListener('click', (e) => {
+  const modal = document.getElementById('delete-modal');
+  if (modal && modal.style.display === 'flex' && e.target === modal) {
+    closeDeleteModal();
+  }
 });
+
+// Close modal on Escape key
+document.addEventListener('keydown', (e) => {
+  const modal = document.getElementById('delete-modal');
+  if (modal && modal.style.display === 'flex' && e.key === 'Escape') {
+    closeDeleteModal();
+  }
+});
+
+async function confirmDelete() {
+  if (!pendingDeleteNoteId) return;
+  
+  const noteId = pendingDeleteNoteId;
+  const noteTitle = pendingDeleteNoteTitle;
+  
+  closeDeleteModal();
+  
+  try {
+    const resp = await fetch(`${baseHost}/note/${encodeURIComponent(projectId)}/${encodeURIComponent(noteId)}`, {
+      method: 'DELETE',
+    });
+    
+    if (!resp.ok) {
+      const err = await resp.json();
+      updateStatus(`Error: ${err.detail || err.error || 'Failed to delete note'}`);
+      return;
+    }
+    
+    // Remove from graph data
+    graphData.nodes = graphData.nodes.filter(n => n.id !== noteId);
+    graphData.edges = graphData.edges.filter(e => e.source !== noteId && e.target !== noteId);
+    
+    // Clear editor if this was the selected node
+    if (currentNode && currentNode.id === noteId) {
+      clearEditor();
+      currentNode = null;
+    }
+    
+    // Refresh explorer
+    updateExplorer(currentView);
+    
+    // Refresh graph
+    updateGraph();
+    
+    updateStatus(`Note "${noteTitle || noteId}" deleted`);
+  } catch (e) {
+    updateStatus('Error deleting note');
+    console.error(e);
+  }
+}
+
+function createNewNote() {
+  const id = 'note-' + Date.now();
+  const title = 'New Note';
+  const content = `# ${title}\n\nAdd your knowledge here...\n`;
+  
+  // Save to server
+  saveNote(id, content);
+  
+  // Switch to docs view
+  switchView('docs');
+  
+  // Select the new note
+  setTimeout(() => {
+    const note = graphData.nodes.find(n => n.id === 'note:' + id);
+    if (note) {
+      selectNodeById(note.id);
+    }
+  }, 500);
+}
+
+function openLinkedNote(name) {
+  const note = graphData.nodes.find(n => n.label === name || n.name === name);
+  if (note) {
+    selectNodeById(note.id);
+  }
+}
+
+function openMention(name) {
+  // Find in code graph
+  const func = graphData.nodes.find(n => n.name === name || n.label === name);
+  if (func) {
+    switchView('code');
+    selectNodeById(func.id);
+  }
+}
+
+function updateBacklinks(noteId) {
+  // Find edges pointing to this note
+  const backlinks = graphData.edges.filter(e => {
+    const target = typeof e.target === 'object' ? e.target.id : e.target;
+    return target === noteId;
+  });
+  
+  // Could show in sidebar
+}
+
+// === Graph Controls ===
+function fitGraph() {
+  svg.transition().duration(500).call(d3.zoom().transform, d3.zoomIdentity);
+  if (simulation && physicsEnabled) simulation.alpha(0.3).restart();
+}
+
+function togglePhysics() {
+  physicsEnabled = !physicsEnabled;
+  if (physicsEnabled && simulation) {
+    simulation.alpha(0.3).restart();
+  } else if (simulation) {
+    simulation.stop();
+  }
+}
+
+function zoomIn() {
+  svg.transition().duration(300).call(d3.zoom().scaleBy, 1.3);
+}
+
+function zoomOut() {
+  svg.transition().duration(300).call(d3.zoom().scaleBy, 0.7);
+}
+
+function refreshGraph() {
+  if (currentView === 'code') {
+    loadCodeGraph();
+  } else {
+    loadDocGraph();
+  }
+}
+
+function syncProject() {
+  updateStatus('Syncing project...');
+  // Call sync endpoint
+  fetch(`${baseHost}/graph/${projectId}/sync`, { method: 'POST' })
+    .then(() => {
+      updateStatus('Project synced');
+      refreshGraph();
+    })
+    .catch(() => updateStatus('Sync failed'));
+}
+
+// === Theme ===
+function toggleTheme() {
+  const html = document.documentElement;
+  if (html.getAttribute('data-theme') === 'dark') {
+    html.removeAttribute('data-theme');
+  } else {
+    html.setAttribute('data-theme', 'dark');
+  }
+}
+
+// === Status ===
+function updateStatus(text) {
+  document.getElementById('status-text').textContent = text;
+}
+
+// === Resize Handle ===
+function setupResizeHandle() {
+  const handle = document.getElementById('resizeHandle');
+  const editorPane = document.getElementById('editor-pane');
+  let isResizing = false;
+
+  handle.addEventListener('mousedown', () => {
+    isResizing = true;
+    document.body.style.cursor = 'col-resize';
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!isResizing) return;
+    const container = document.getElementById('content');
+    const rect = container.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const percent = (x / rect.width) * 100;
+    
+    if (percent > 25 && percent < 75) {
+      editorPane.style.width = percent + '%';
+    }
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (isResizing) {
+      isResizing = false;
+      document.body.style.cursor = 'default';
+    }
+  });
+}
 </script>
 
-<!-- Spec Editor Modal -->
-<div id="specModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:1000;justify-content:center;align-items:center">
-  <div style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:90%;max-width:800px;height:90%;display:flex;flex-direction:column;padding:20px">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-      <h3 style="margin:0;font-size:16px">Edit Project Spec</h3>
-      <button onclick="closeSpecEditor()" style="background:var(--surface);border:1px solid var(--border);color:var(--text);padding:4px 12px;border-radius:6px;cursor:pointer">&times;</button>
+<!-- Delete Confirmation Modal -->
+<div id="delete-modal" class="modal-overlay" style="display: none;">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h3>Delete Note</h3>
     </div>
-    <textarea id="specEditor" style="flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:12px;border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:13px;resize:none;outline:none;line-height:1.5"></textarea>
-    <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">
-      <button class="secondary" onclick="closeSpecEditor()">Cancel</button>
-      <button onclick="saveSpec()">Save Spec</button>
+    <div class="modal-body">
+      <p id="delete-modal-message">Are you sure you want to delete this note?</p>
+      <p style="color: var(--text-muted); font-size: 12px; margin-top: 8px;">This action cannot be undone.</p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-small" onclick="closeDeleteModal()">Cancel</button>
+      <button class="btn btn-danger btn-small" onclick="confirmDelete()">Delete</button>
     </div>
   </div>
 </div>

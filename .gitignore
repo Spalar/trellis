@@ -1,4 +1,14 @@
-.trellis 
+.trellis
+
+# Compiled binaries (auto-built from submodule)
+bin/*
+!bin/.gitkeep
+!bin/version.txt
+
+# Submodule directory (tracked separately)
+third_party/*
+!third_party/.gitkeep
+
 # By default data is not tracked in git, but you can add it to the repository if you want to share it with others or keep it under version control. To do this, you can remove the .gitignore entry for the data directory and commit the changes to your repository.
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -108,3 +118,4 @@ Thumbs.db
 #Pipfile.lock
 #poetry.lock
 #uv.lock
+.code-graph/
