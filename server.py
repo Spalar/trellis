@@ -54,36 +54,42 @@ def _resolve_project_path(project_id: str) -> str:
     """Resolve project ID to actual path.
     
     Searches multiple locations and prefers paths with a .git directory.
+    Never resolves to a directory inside the trellis repo to avoid polluting it.
     """
     if project_id == "trellis":
         return str(Path(__file__).parent)
     
     path = Path(project_id)
-    if path.is_absolute() and path.exists():
-        return str(path)
+    trellis_root = Path(__file__).parent.resolve()
     
-    # Collect all candidate paths
+    if path.is_absolute() and path.exists():
+        resolved = path.resolve()
+        # Don't allow resolving to inside trellis unless it's trellis itself
+        if not _is_inside_trellis(resolved, trellis_root):
+            return str(resolved)
+    
+    # Collect all candidate paths (excluding trellis internals)
     candidates = []
     
     # 1. Relative to current directory
     if path.exists():
-        candidates.append(path.resolve())
+        resolved = path.resolve()
+        if not _is_inside_trellis(resolved, trellis_root):
+            candidates.append(resolved)
     
-    # 2. Relative to trellis root
-    trellis_root = Path(__file__).parent
-    candidate = trellis_root / project_id
-    if candidate.exists() and candidate.resolve() not in candidates:
-        candidates.append(candidate.resolve())
-    
-    # 3. Sibling of trellis root (common pattern: repos/ProjectName)
+    # 2. Sibling of trellis root (common pattern: repos/ProjectName)
     sibling = trellis_root.parent / project_id
     if sibling.exists() and sibling.resolve() not in candidates:
         candidates.append(sibling.resolve())
     
-    # 4. Parent of current directory
+    # 3. Parent of current directory
     parent_sibling = Path.cwd().parent / project_id
     if parent_sibling.exists() and parent_sibling.resolve() not in candidates:
         candidates.append(parent_sibling.resolve())
+    
+    # 4. Check if user provided absolute path that doesn't exist yet
+    if path.is_absolute():
+        return str(path)
     
     if not candidates:
         return project_id  # Fallback
@@ -95,6 +101,15 @@ def _resolve_project_path(project_id: str) -> str:
     
     # Otherwise return the first candidate
     return str(candidates[0])
+
+
+def _is_inside_trellis(path: Path, trellis_root: Path) -> bool:
+    """Check if a path is inside the trellis repository directory."""
+    try:
+        path.relative_to(trellis_root)
+        return True
+    except ValueError:
+        return False
 
 
 def _get_bridge(project_id: str) -> "CodeGraphBridge":

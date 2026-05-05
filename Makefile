@@ -1,5 +1,5 @@
 # Trellis Core - Makefile
-.PHONY: install dev trellis-dev-vscode run run-http compose-up compose-down compose-logs test lint format clean check
+.PHONY: install dev trellis-dev-vscode run run-http test lint format clean check
 
 PYTHON ?= python
 VENV := .venv
@@ -19,7 +19,7 @@ $(PYTHON_VENV):
 install: $(PYTHON_VENV)
 	$(PYTHON_VENV) -m pip install --upgrade pip
 	$(PYTHON_VENV) -m pip install -e .[dev]
-	@echo "Trellis installed. Run 'make dev' for stdio, 'make run-http' for bare-metal HTTP, or 'make compose-up' for Docker."
+	@echo "Trellis installed. Run 'make dev' for stdio or 'make run-http' for HTTP."
 
 dev:
 	@echo "Copilot MCP stdio config:"
@@ -50,17 +50,6 @@ endif
 
 check:
 	curl -sSf http://localhost:17317/health -o nul 2>&1 || echo Health check failed
-
-compose-up:
-	docker compose up --build -d
-	@echo "Trellis running on http://localhost:17317"
-	@echo "Health: make check"
-
-compose-down:
-	docker compose down -v
-
-compose-logs:
-	docker compose logs -f trellis
 
 test:
 	$(PYTHON_VENV) -m pytest -v
