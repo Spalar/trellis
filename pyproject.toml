@@ -17,6 +17,7 @@ dependencies = [
   "tree-sitter-javascript>=0.25.0",
   "tree-sitter-typescript>=0.23.0",
   "python-dotenv>=1.0.0",
+  "GitPython>=3.1.0",
 ]
 
 [project.optional-dependencies]

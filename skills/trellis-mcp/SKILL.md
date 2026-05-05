@@ -173,12 +173,22 @@ Re-sync and re-analyze after implementing changes to catch unintended side effec
    ```
    *When: Verifying changes are safe*
 
-3. **Check divergence**:
+3. **Analyze diff**:
    ```
-   trellis_analyze_diff(project_id="my-project", diff="...")
+   trellis_analyze_diff(project_id="my-project")
    ```
-   *When: Reviewing PRs or commits*
-   *Note: Currently simplified; use trellis_analyze_impact for detailed analysis*
+   *When: Reviewing PRs, commits, or uncommitted changes*
+   *Returns: Changed files, affected functions, impact analysis, overall risk*
+   *Parameters:*
+   - `diff`: Optional raw diff string (auto-detected from git if not provided)
+   - `compare_branch`: Branch to compare against (default: origin/main)
+
+   This tool automatically:
+   1. Gets diff from git (or uses provided diff)
+   2. Parses changed files and line numbers
+   3. Finds affected functions via code graph
+   4. Runs impact analysis on each function
+   5. Returns comprehensive risk report
 
 ## Key Tools Reference
 
@@ -195,7 +205,7 @@ Re-sync and re-analyze after implementing changes to catch unintended side effec
 | `trellis_trace_path` | `project_id`, `from_feature`, `to_feature` | Dependency path between features | Trace dependencies |
 | `trellis_detect_hotspots` | `project_id` | High-centrality functions | Find complex areas |
 | `trellis_visualize_graph` | `project_id` | Graph data for UI | Visualization |
-| `trellis_analyze_diff` | `project_id`, `diff` | Diff analysis summary | PR reviews |
+| `trellis_analyze_diff` | `project_id`, `diff`, `compare_branch` | Changed files, affected functions, impact report, risk level | PR reviews, pre-commit checks |
 
 ### Doc Graph Tools (6 tools)
 
@@ -220,6 +230,11 @@ Re-sync and re-analyze after implementing changes to catch unintended side effec
 - `function_path`: Function name or qualified name (e.g., "authenticate_user" or "auth.authenticate_user")
 - `depth_mode`: "standard" or "deep" for analysis depth
 
+**trellis_analyze_diff**:
+- `diff`: Optional raw diff string. If not provided, automatically fetches from git working tree
+- `compare_branch`: Branch to compare against (default: origin/main or main)
+- Returns: Overall risk, changed files, affected functions with impact analysis
+
 **trellis_create_note**:
 - `note_id`: Unique identifier (e.g., "feature-auth", "decision-jwt")
 - `title`: Human-readable title
@@ -242,7 +257,7 @@ Changed code?
     → Run: trellis_sync + trellis_analyze_impact
 
 Reviewing someone else's code?
-  → Run: trellis_analyze_diff (or trellis_analyze_impact on key functions)
+  → Run: trellis_analyze_diff (auto-detects git changes and analyzes impact)
 
 Multiple approaches possible?
   → Run: trellis_trace_path to compare coupling
@@ -289,6 +304,13 @@ Looking for documentation?
 4. `trellis_sync` + verify contracts preserved
 5. Update notes with performance decisions
 
+### Pattern: Reviewing Code Changes
+
+1. `trellis_analyze_diff` - Auto-detect git changes and get impact report
+2. Focus on HIGH/CRITICAL risk functions
+3. `trellis_get_function` - Inspect specific functions if needed
+4. `trellis_analyze_impact` - Deep dive on high-risk changes
+
 ### Pattern: Onboarding to New Codebase
 
 1. `trellis_sync` - Index the repo
@@ -322,3 +344,4 @@ Read the relevant reference file before Phase 2 (Strategy) of the workflow.
 6. **Use specific paths**: Reference functions by name from Trellis output
 7. **Link everything**: Use `[[Note]]` and `@Function` to connect docs and code
 8. **Read references**: Check `references/impact-analysis.md` before complex changes
+9. **Re-sync if call edges seem missing**: If impact analysis returns 0 callers unexpectedly, run `trellis_sync` to rebuild the code graph (code-graph-mcp background indexing may wipe custom call edges)

@@ -43,6 +43,9 @@ class CodeGraphBridge:
         # Setup .code-graph in trellis data directory with symlink in project
         self.code_graph_path = get_code_graph_path(self.project_path)
         
+        # Track when call edges were last rebuilt to avoid redundant work
+        self._last_call_edge_check: float = 0.0
+        
         # Register cleanup
         atexit.register(self.close)
     
@@ -89,6 +92,11 @@ class CodeGraphBridge:
             if self._proc is not None and self._proc.poll() is None:
                 return
             
+            # Check if DB is locked by another process
+            if self._is_db_locked():
+                print("[Trellis] DB is locked, cleaning up zombie processes...")
+                self._kill_zombie_processes()
+            
             env = os.environ.copy()
             
             self._proc = subprocess.Popen(
@@ -102,6 +110,109 @@ class CodeGraphBridge:
                 bufsize=1,  # Line buffered
             )
     
+    def _kill_zombie_processes(self) -> None:
+        """Kill any leftover code-graph-mcp processes for this project."""
+        import subprocess
+        try:
+            # Try using taskkill on Windows
+            if os.name == 'nt':
+                subprocess.run(
+                    ['taskkill', '/F', '/IM', 'code-graph-mcp.exe'],
+                    capture_output=True,
+                    timeout=10
+                )
+            else:
+                # Try using pkill on Unix
+                subprocess.run(
+                    ['pkill', '-9', '-f', 'code-graph-mcp'],
+                    capture_output=True,
+                    timeout=10
+                )
+        except Exception:
+            pass
+        
+        # Also try psutil if available
+        try:
+            import psutil
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                if proc.info['name'] and 'code-graph-mcp' in proc.info['name']:
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=2)
+                    except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+                        pass
+        except ImportError:
+            pass
+        
+        # Clean up lock files
+        try:
+            lock_file = self.code_graph_path / "index.lock"
+            if lock_file.exists():
+                lock_file.unlink()
+        except Exception:
+            pass
+        
+        # Small delay to let OS release locks
+        import time
+        time.sleep(0.5)
+    
+    def _is_db_locked(self) -> bool:
+        """Check if the SQLite DB is currently locked."""
+        db_path = self.code_graph_path / "index.db"
+        if not db_path.exists():
+            return False
+        
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(db_path), timeout=1)
+            conn.execute("SELECT 1")
+            conn.close()
+            return False
+        except sqlite3.OperationalError:
+            return True
+    
+    def _ensure_call_edges(self) -> None:
+        """Ensure Python call edges exist in the database.
+        
+        code-graph-mcp's incremental indexing deletes files which CASCADE deletes
+        our custom 'calls' edges. This method detects missing edges and re-runs
+        the Python call indexer to restore them.
+        """
+        import time
+        
+        # Only check once per minute to avoid redundant work
+        now = time.time()
+        if now - self._last_call_edge_check < 60:
+            return
+        self._last_call_edge_check = now
+        
+        db_path = self.code_graph_path / "index.db"
+        if not db_path.exists():
+            return
+        
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(db_path))
+            cursor = conn.cursor()
+            
+            # Check if we have any call edges
+            cursor.execute("SELECT COUNT(*) FROM edges WHERE relation = 'calls'")
+            count = cursor.fetchone()[0]
+            conn.close()
+            
+            # If no call edges, re-run the Python call indexer
+            if count == 0:
+                print("[Trellis] Call edges missing, rebuilding...")
+                try:
+                    from .python_call_indexer import PythonCallGraphIndexer
+                    indexer = PythonCallGraphIndexer(str(self.project_path))
+                    indexer.index_calls()
+                    print("[Trellis] Call edges restored")
+                except Exception as e:
+                    print(f"[Trellis] Warning: Could not restore call edges: {e}")
+        except Exception:
+            pass
+    
     def _call(self, tool_name: str, **arguments) -> Union[Dict, List, str]:
         """Call an MCP tool via JSON-RPC.
         
@@ -111,6 +222,9 @@ class CodeGraphBridge:
             
         Returns:
             Tool result (dict, list, or string)
+            
+        Raises:
+            RuntimeError: If process communication fails or times out
         """
         self._ensure_running()
         
@@ -131,8 +245,36 @@ class CodeGraphBridge:
             self._proc.stdin.write(request_line)
             self._proc.stdin.flush()
             
-            # Read response
-            response_line = self._proc.stdout.readline()
+            # Read response with timeout to prevent infinite hangs
+            # Use threading approach (cross-platform, works with pipes on Windows)
+            import threading
+            
+            timeout = 30  # Wait up to 30 seconds for response
+            result = {'line': None, 'error': None}
+            
+            def read_line():
+                try:
+                    result['line'] = self._proc.stdout.readline()
+                except Exception as e:
+                    result['error'] = e
+            
+            thread = threading.Thread(target=read_line)
+            thread.daemon = True
+            thread.start()
+            thread.join(timeout)
+            
+            if thread.is_alive():
+                self.close()
+                raise RuntimeError(
+                    f"Tool '{tool_name}' timed out after {timeout}s. "
+                    "The code-graph-mcp process may be hung. Try restarting."
+                )
+            
+            if result['error']:
+                raise result['error']
+            
+            response_line = result['line']
+            
             if not response_line:
                 raise RuntimeError("code-graph-mcp process closed unexpectedly")
             
@@ -165,11 +307,11 @@ class CodeGraphBridge:
         if self._proc is not None:
             try:
                 self._proc.terminate()
-                self._proc.wait(timeout=5)
+                self._proc.wait(timeout=2)
             except (subprocess.TimeoutExpired, ProcessLookupError):
                 try:
                     self._proc.kill()
-                    self._proc.wait(timeout=2)
+                    self._proc.wait(timeout=1)
                 except Exception:
                     pass
             self._proc = None
@@ -350,9 +492,12 @@ class CodeGraphBridge:
             try:
                 from .python_call_indexer import PythonCallGraphIndexer
                 indexer = PythonCallGraphIndexer(str(self.project_path))
-                indexer.index_calls()
-            except Exception:
-                pass  # Optional enhancement
+                call_result = indexer.index_calls()
+                result["call_indexer"] = call_result
+            except Exception as e:
+                import traceback
+                result["call_indexer_error"] = str(e)
+                result["call_indexer_traceback"] = traceback.format_exc()
         
         return result
     
@@ -433,7 +578,7 @@ class CodeGraphBridge:
                     for row in cursor.fetchall()
                 ]
                 conn.close()
-            except Exception as e:
+            except Exception:
                 # Fall back to MCP tool if DB query fails
                 search_result = self._call("ast_search", type="fn", limit=100)
                 if isinstance(search_result, dict):
@@ -709,13 +854,12 @@ class CodeGraphBridge:
         - Feature mapping (project.md)
         - Cross-feature dependencies
         
-        Args:
-            symbol: Function/symbol to analyze
-            depth: Call graph depth
-            
         Returns:
             Impact report with affected functions, features, divergence, pointers
         """
+        # Ensure call edges exist (they may have been wiped by code-graph-mcp indexing)
+        self._ensure_call_edges()
+        
         from .impact_analyzer import ImpactAnalyzer
         analyzer = ImpactAnalyzer(self, str(self.project_path))
         return analyzer.analyze_impact(symbol, depth=depth)

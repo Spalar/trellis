@@ -51,7 +51,10 @@ _bridge_cache: Dict[str, "CodeGraphBridge"] = {}
 
 
 def _resolve_project_path(project_id: str) -> str:
-    """Resolve project ID to actual path."""
+    """Resolve project ID to actual path.
+    
+    Searches multiple locations and prefers paths with a .git directory.
+    """
     if project_id == "trellis":
         return str(Path(__file__).parent)
     
@@ -59,17 +62,39 @@ def _resolve_project_path(project_id: str) -> str:
     if path.is_absolute() and path.exists():
         return str(path)
     
-    # Try relative to current directory
-    if path.exists():
-        return str(path.resolve())
+    # Collect all candidate paths
+    candidates = []
     
-    # Try relative to trellis root
+    # 1. Relative to current directory
+    if path.exists():
+        candidates.append(path.resolve())
+    
+    # 2. Relative to trellis root
     trellis_root = Path(__file__).parent
     candidate = trellis_root / project_id
-    if candidate.exists():
-        return str(candidate.resolve())
+    if candidate.exists() and candidate.resolve() not in candidates:
+        candidates.append(candidate.resolve())
     
-    return project_id  # Fallback
+    # 3. Sibling of trellis root (common pattern: repos/ProjectName)
+    sibling = trellis_root.parent / project_id
+    if sibling.exists() and sibling.resolve() not in candidates:
+        candidates.append(sibling.resolve())
+    
+    # 4. Parent of current directory
+    parent_sibling = Path.cwd().parent / project_id
+    if parent_sibling.exists() and parent_sibling.resolve() not in candidates:
+        candidates.append(parent_sibling.resolve())
+    
+    if not candidates:
+        return project_id  # Fallback
+    
+    # Prefer the candidate with a .git directory
+    for candidate in candidates:
+        if (candidate / ".git").exists():
+            return str(candidate)
+    
+    # Otherwise return the first candidate
+    return str(candidates[0])
 
 
 def _get_bridge(project_id: str) -> "CodeGraphBridge":
@@ -228,10 +253,63 @@ async def trellis_get_function(
     project_id: str = "",
     function_path: str = "",
 ) -> str:
-    """Get details for a specific function."""
+    """Get details for a specific function.
+    
+    function_path can be:
+    - Just the function name: "create_llm"
+    - Qualified name: "AIFactory.create_llm" 
+    - File:function format: "backend/ai/factory.py:create_llm"
+    """
     try:
         bridge = _get_bridge(project_id)
-        node = bridge.get_ast_node(function_path)
+        
+        # Handle file:function format by extracting just the function name
+        symbol = function_path
+        if ":" in function_path:
+            symbol = function_path.split(":")[-1]
+        
+        # Try direct lookup first
+        node = bridge.get_ast_node(symbol)
+        
+        # If not found, try searching by name in SQLite
+        if not node or (isinstance(node, dict) and ("error" in node or not node.get("name"))):
+            import sqlite3
+            from src.trellis.utils import resolve_code_graph_db
+            
+            db_path = resolve_code_graph_db(bridge.project_path)
+            if db_path.exists():
+                conn = sqlite3.connect(str(db_path))
+                cursor = conn.cursor()
+                
+                # Search by name or qualified_name
+                cursor.execute("""
+                    SELECT n.name, n.qualified_name, f.path, n.start_line, n.end_line, n.type, n.signature, n.code_content
+                    FROM nodes n
+                    JOIN files f ON n.file_id = f.id
+                    WHERE (n.name = ? OR n.qualified_name = ?)
+                      AND n.type IN ('function', 'method')
+                    LIMIT 5
+                """, (symbol, symbol))
+                
+                rows = cursor.fetchall()
+                conn.close()
+                
+                if rows:
+                    # Return the first match
+                    row = rows[0]
+                    node = {
+                        "name": row[0],
+                        "qualified_name": row[1] or row[0],
+                        "file_path": row[2],
+                        "start_line": row[3],
+                        "end_line": row[4],
+                        "type": row[5],
+                        "signature": row[6] or "",
+                        "code_content": row[7] or "",
+                    }
+                else:
+                    node = {"error": f"Function '{symbol}' not found in index"}
+        
         return json.dumps(node, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
@@ -283,11 +361,84 @@ async def trellis_trace_path(
     from_feature: str = "",
     to_feature: str = "",
 ) -> str:
-    """Trace dependency path between two features."""
+    """Trace dependency path between two features/modules.
+    
+    Features can be module paths like "backend/ai/providers" or "backend/chat".
+    """
     try:
         bridge = _get_bridge(project_id)
-        deps = bridge.dependency_graph(from_feature)
-        return json.dumps(deps, indent=2)
+        
+        # Use SQLite to find connections between modules
+        import sqlite3
+        from src.trellis.utils import resolve_code_graph_db
+        
+        db_path = resolve_code_graph_db(bridge.project_path)
+        if not db_path.exists():
+            return json.dumps({"error": "No code-graph database found. Run trellis_sync first."}, indent=2)
+        
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        
+        # Find files in from_feature module
+        cursor.execute("""
+            SELECT DISTINCT f.path 
+            FROM files f 
+            WHERE f.path LIKE ?
+        """, (f"%{from_feature}%",))
+        from_files = [row[0] for row in cursor.fetchall()]
+        
+        # Find files in to_feature module
+        cursor.execute("""
+            SELECT DISTINCT f.path 
+            FROM files f 
+            WHERE f.path LIKE ?
+        """, (f"%{to_feature}%",))
+        to_files = [row[0] for row in cursor.fetchall()]
+        
+        if not from_files:
+            return json.dumps({"error": f"Module '{from_feature}' not found"}, indent=2)
+        if not to_files:
+            return json.dumps({"error": f"Module '{to_feature}' not found"}, indent=2)
+        
+        # Find import/call edges between the modules
+        cursor.execute("""
+            SELECT DISTINCT 
+                sf.path as from_file,
+                tf.path as to_file,
+                s.name as symbol_name,
+                e.relation
+            FROM edges e
+            JOIN nodes s ON e.source_id = s.id
+            JOIN nodes t ON e.target_id = t.id
+            JOIN files sf ON s.file_id = sf.id
+            JOIN files tf ON t.file_id = tf.id
+            WHERE e.relation IN ('calls', 'imports')
+              AND sf.path LIKE ?
+              AND tf.path LIKE ?
+            LIMIT 20
+        """, (f"%{from_feature}%", f"%{to_feature}%"))
+        
+        direct_connections = []
+        for row in cursor.fetchall():
+            direct_connections.append({
+                "from_file": row[0],
+                "to_file": row[1],
+                "symbol": row[2],
+                "relation": row[3]
+            })
+        
+        conn.close()
+        
+        return json.dumps({
+            "from_feature": from_feature,
+            "to_feature": to_feature,
+            "from_files_count": len(from_files),
+            "to_files_count": len(to_files),
+            "direct_connections": direct_connections,
+            "connection_count": len(direct_connections),
+            "from_files_sample": from_files[:5],
+            "to_files_sample": to_files[:5],
+        }, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
 
@@ -326,15 +477,226 @@ async def trellis_detect_hotspots(
 async def trellis_analyze_diff(
     project_id: str = "",
     diff: str = "",
+    compare_branch: str = "",
 ) -> str:
-    """Analyze impact of a code diff."""
+    """Analyze impact of a code diff.
+    
+    Automatically detects changed functions from git diff and runs impact analysis.
+    
+    Args:
+        project_id: Project to analyze
+        diff: Optional raw diff string. If not provided, fetches from git.
+        compare_branch: Branch to compare against (default: origin/main or main)
+    """
     try:
-        # Parse diff to find changed functions
-        # This is a simplified version
+        import re
+        import sqlite3
+        from src.trellis.utils import resolve_code_graph_db
+        
+        resolved = _resolve_project_path(project_id)
+        
+        # Resolve symlinks/junctions to real path for git operations
+        resolved_real = str(Path(resolved).resolve())
+        
+        # Step 1: Get diff if not provided
+        if not diff:
+            try:
+                import git
+                repo = git.Repo(resolved_real)
+                
+                # Determine what to diff against
+                if compare_branch:
+                    target = compare_branch
+                else:
+                    # Try common default branches
+                    for branch in ["origin/main", "origin/master", "main", "master"]:
+                        try:
+                            repo.rev_parse(branch)
+                            target = branch
+                            break
+                        except git.BadName:
+                            continue
+                    else:
+                        # No remote branch, get unstaged changes
+                        diff = repo.git.diff()
+                        target = None
+                
+                if target and not diff:
+                    diff = repo.git.diff(target)
+                
+                if not diff:
+                    return json.dumps({
+                        "status": "no_changes",
+                        "message": "No changes detected in git working tree",
+                        "project": project_id,
+                    }, indent=2)
+                    
+            except ImportError:
+                return json.dumps({
+                    "error": "GitPython not installed. Either install it (pip install GitPython) or provide the diff parameter directly: trellis_analyze_diff(project_id='...', diff='...')",
+                }, indent=2)
+            except git.InvalidGitRepositoryError:
+                return json.dumps({
+                    "error": f"'{resolved_real}' is not a git repository.\n\nTo fix:\n1. Pass the absolute path: trellis_analyze_diff(project_id='/path/to/repo')\n2. Or provide the diff directly: trellis_analyze_diff(project_id='{project_id}', diff='...')",
+                }, indent=2)
+        
+        # Step 2: Parse unified diff to find changed files and line numbers
+        changed_files = {}  # file_path -> set of changed line numbers
+        current_file = None
+        current_line = 0
+        
+        for line in diff.split('\n'):
+            # File header: --- a/path or +++ b/path
+            if line.startswith('--- ') or line.startswith('+++ '):
+                # Extract file path, skip /dev/null
+                path = line[4:].split('\t')[0]
+                if path.startswith('a/'):
+                    path = path[2:]
+                elif path.startswith('b/'):
+                    path = path[2:]
+                if path != '/dev/null':
+                    current_file = path
+                    if current_file not in changed_files:
+                        changed_files[current_file] = set()
+            
+            # Hunk header: @@ -old_start,old_len +new_start,new_len @@
+            elif line.startswith('@@') and current_file:
+                match = re.match(r'@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@', line)
+                if match:
+                    current_line = int(match.group(1))
+            
+            # Added line (in new file)
+            elif line.startswith('+') and not line.startswith('+++') and current_file:
+                changed_files[current_file].add(current_line)
+                current_line += 1
+            
+            # Removed line (skip in new file line counting)
+            elif line.startswith('-') and not line.startswith('---') and current_file:
+                # Line was removed, note it but don't increment counter
+                pass
+            
+            # Context line
+            elif current_file and not line.startswith('\\'):
+                current_line += 1
+        
+        # Filter out files with no actual line changes
+        changed_files = {f: lines for f, lines in changed_files.items() if lines}
+        
+        if not changed_files:
+            return json.dumps({
+                "status": "no_changes",
+                "message": "No file changes detected in diff",
+                "diff_length": len(diff),
+            }, indent=2)
+        
+        # Step 3: Query SQLite to find affected functions
+        db_path = resolve_code_graph_db(resolved)
+        affected_functions = []
+        
+        if db_path.exists():
+            try:
+                conn = sqlite3.connect(str(db_path))
+                cursor = conn.cursor()
+                
+                for file_path, line_numbers in changed_files.items():
+                    if not line_numbers:
+                        continue
+                    
+                    # Find functions in this file that overlap with changed lines
+                    cursor.execute("""
+                        SELECT DISTINCT n.name, n.qualified_name, f.path, 
+                               n.start_line, n.end_line, n.type
+                        FROM nodes n
+                        JOIN files f ON n.file_id = f.id
+                        WHERE f.path LIKE ?
+                          AND n.type IN ('function', 'method', 'class')
+                          AND n.start_line <= ?
+                          AND n.end_line >= ?
+                    """, (f'%{file_path}%', max(line_numbers), min(line_numbers)))
+                    
+                    for row in cursor.fetchall():
+                        # Verify actual overlap with changed lines
+                        func_start, func_end = row[3], row[4]
+                        changed_in_func = [line for line in line_numbers if func_start <= line <= func_end]
+                        
+                        if changed_in_func:
+                            affected_functions.append({
+                                "name": row[0],
+                                "qualified_name": row[1] or row[0],
+                                "file_path": row[2],
+                                "type": row[5],
+                                "changed_lines": len(changed_in_func),
+                                "line_range": [func_start, func_end],
+                            })
+                
+                conn.close()
+            except Exception:
+                # Continue without function-level details
+                pass
+        
+        # Step 4: Run impact analysis on unique affected functions
+        bridge = _get_bridge(project_id)
+        impact_results = []
+        analyzed_symbols = set()
+        
+        for func in affected_functions:
+            symbol = func["qualified_name"] or func["name"]
+            if symbol in analyzed_symbols:
+                continue
+            analyzed_symbols.add(symbol)
+            
+            try:
+                report = bridge.get_feature_impact(symbol, depth=2)
+                impact_results.append({
+                    "symbol": symbol,
+                    "file_path": func["file_path"],
+                    "type": func["type"],
+                    "changed_lines": func["changed_lines"],
+                    "risk_level": report.get("risk_level", "unknown"),
+                    "affected_functions": report.get("affected_functions_count", 0),
+                    "affected_files": report.get("affected_files_count", 0),
+                    "feature_impacts": [
+                        {
+                            "feature": fi["feature_name"],
+                            "functions": len(fi["impacted_functions"]),
+                        }
+                        for fi in report.get("feature_impacts", [])
+                    ],
+                })
+            except Exception as e:
+                impact_results.append({
+                    "symbol": symbol,
+                    "file_path": func["file_path"],
+                    "error": str(e),
+                })
+        
+        # Step 5: Calculate overall risk
+        risk_scores = {"critical": 4, "high": 3, "medium": 2, "low": 1, "unknown": 0}
+        max_risk = max(
+            [risk_scores.get(r["risk_level"], 0) for r in impact_results if "risk_level" in r],
+            default=0
+        )
+        risk_labels = {4: "critical", 3: "high", 2: "medium", 1: "low", 0: "unknown"}
+        overall_risk = risk_labels.get(max_risk, "unknown")
+        
+        total_affected_funcs = sum(
+            r.get("affected_functions", 0) 
+            for r in impact_results 
+            if "affected_functions" in r
+        )
+        
         return json.dumps({
-            "message": "Diff analysis requires git integration. Use trellis_analyze_impact for specific functions.",
-            "diff_length": len(diff),
+            "status": "ok",
+            "project": project_id,
+            "overall_risk": overall_risk,
+            "changed_files_count": len(changed_files),
+            "changed_files": list(changed_files.keys()),
+            "affected_functions_count": len(affected_functions),
+            "unique_functions_analyzed": len(impact_results),
+            "total_downstream_affected": total_affected_funcs,
+            "functions": impact_results,
         }, indent=2)
+        
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
 
