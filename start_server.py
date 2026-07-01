@@ -13,5 +13,5 @@ if __name__ == "__main__":
     print("URL: http://localhost:17318")
     print("Press Ctrl+C to stop")
     print()
-    
+
     uvicorn.run(app, host="0.0.0.0", port=17318)

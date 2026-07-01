@@ -21,7 +21,9 @@ class AnalyticsStore:
     def _get_conn(self) -> sqlite3.Connection:
         """Get thread-local connection."""
         if not hasattr(self._local, "conn") or self._local.conn is None:
-            self._local.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+            self._local.conn = sqlite3.connect(
+                str(self.db_path), check_same_thread=False
+            )
             self._local.conn.row_factory = sqlite3.Row
         return self._local.conn
 
@@ -117,18 +119,21 @@ class AnalyticsStore:
     ) -> None:
         """Record a tool call with timing."""
         with self._transaction() as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT INTO tool_calls (timestamp, tool_name, project_id, duration_ms, status, error_message, params)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                datetime.now().isoformat(),
-                tool_name,
-                project_id,
-                duration_ms,
-                status,
-                error_message,
-                json.dumps(params) if params else None,
-            ))
+            """,
+                (
+                    datetime.now().isoformat(),
+                    tool_name,
+                    project_id,
+                    duration_ms,
+                    status,
+                    error_message,
+                    json.dumps(params) if params else None,
+                ),
+            )
 
     def record_sync(
         self,
@@ -142,19 +147,22 @@ class AnalyticsStore:
     ) -> None:
         """Record sync operation metrics."""
         with self._transaction() as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT INTO sync_metrics (timestamp, project_id, duration_ms, functions_indexed, features_indexed, incremental, files_parsed, files_skipped)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                datetime.now().isoformat(),
-                project_id,
-                duration_ms,
-                functions_indexed,
-                features_indexed,
-                incremental,
-                files_parsed,
-                files_skipped,
-            ))
+            """,
+                (
+                    datetime.now().isoformat(),
+                    project_id,
+                    duration_ms,
+                    functions_indexed,
+                    features_indexed,
+                    incremental,
+                    files_parsed,
+                    files_skipped,
+                ),
+            )
 
     def record_metric(
         self,
@@ -165,16 +173,19 @@ class AnalyticsStore:
     ) -> None:
         """Record a generic performance metric."""
         with self._transaction() as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT INTO performance_snapshots (timestamp, project_id, operation, metric_name, metric_value)
                 VALUES (?, ?, ?, ?, ?)
-            """, (
-                datetime.now().isoformat(),
-                project_id,
-                operation,
-                metric_name,
-                metric_value,
-            ))
+            """,
+                (
+                    datetime.now().isoformat(),
+                    project_id,
+                    operation,
+                    metric_name,
+                    metric_value,
+                ),
+            )
 
     # ------------------------------------------------------------------
     # Query methods
@@ -182,7 +193,8 @@ class AnalyticsStore:
     def get_tool_call_stats(self, hours: int = 24) -> List[Dict[str, Any]]:
         """Get aggregated tool call statistics."""
         conn = self._get_conn()
-        rows = conn.execute("""
+        rows = conn.execute(
+            """
             SELECT 
                 tool_name,
                 COUNT(*) as call_count,
@@ -195,8 +207,10 @@ class AnalyticsStore:
             WHERE timestamp > datetime('now', ?)
             GROUP BY tool_name
             ORDER BY call_count DESC
-        """, (f"-{hours} hours",)).fetchall()
-        
+        """,
+            (f"-{hours} hours",),
+        ).fetchall()
+
         return [
             {
                 "tool_name": row["tool_name"],
@@ -204,7 +218,9 @@ class AnalyticsStore:
                 "avg_duration_ms": round(row["avg_duration"], 2),
                 "min_duration_ms": round(row["min_duration"], 2),
                 "max_duration_ms": round(row["max_duration"], 2),
-                "success_rate": round(row["success_count"] / row["call_count"] * 100, 1) if row["call_count"] > 0 else 0,
+                "success_rate": round(row["success_count"] / row["call_count"] * 100, 1)
+                if row["call_count"] > 0
+                else 0,
                 "error_count": row["error_count"],
             }
             for row in rows
@@ -213,12 +229,15 @@ class AnalyticsStore:
     def get_recent_calls(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Get recent tool calls."""
         conn = self._get_conn()
-        rows = conn.execute("""
+        rows = conn.execute(
+            """
             SELECT * FROM tool_calls
             ORDER BY timestamp DESC
             LIMIT ?
-        """, (limit,)).fetchall()
-        
+        """,
+            (limit,),
+        ).fetchall()
+
         return [
             {
                 "id": row["id"],
@@ -232,23 +251,31 @@ class AnalyticsStore:
             for row in rows
         ]
 
-    def get_sync_history(self, project_id: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
+    def get_sync_history(
+        self, project_id: Optional[str] = None, limit: int = 20
+    ) -> List[Dict[str, Any]]:
         """Get sync operation history."""
         conn = self._get_conn()
         if project_id:
-            rows = conn.execute("""
+            rows = conn.execute(
+                """
                 SELECT * FROM sync_metrics
                 WHERE project_id = ?
                 ORDER BY timestamp DESC
                 LIMIT ?
-            """, (project_id, limit)).fetchall()
+            """,
+                (project_id, limit),
+            ).fetchall()
         else:
-            rows = conn.execute("""
+            rows = conn.execute(
+                """
                 SELECT * FROM sync_metrics
                 ORDER BY timestamp DESC
                 LIMIT ?
-            """, (limit,)).fetchall()
-        
+            """,
+                (limit,),
+            ).fetchall()
+
         return [
             {
                 "id": row["id"],
@@ -264,10 +291,13 @@ class AnalyticsStore:
             for row in rows
         ]
 
-    def get_performance_trends(self, operation: str, hours: int = 24) -> List[Dict[str, Any]]:
+    def get_performance_trends(
+        self, operation: str, hours: int = 24
+    ) -> List[Dict[str, Any]]:
         """Get performance trends for an operation."""
         conn = self._get_conn()
-        rows = conn.execute("""
+        rows = conn.execute(
+            """
             SELECT 
                 strftime('%Y-%m-%d %H:00:00', timestamp) as hour,
                 AVG(metric_value) as avg_value,
@@ -276,8 +306,10 @@ class AnalyticsStore:
             WHERE operation = ? AND timestamp > datetime('now', ?)
             GROUP BY hour
             ORDER BY hour
-        """, (operation, f"-{hours} hours")).fetchall()
-        
+        """,
+            (operation, f"-{hours} hours"),
+        ).fetchall()
+
         return [
             {
                 "hour": row["hour"],
@@ -290,28 +322,38 @@ class AnalyticsStore:
     def get_summary_stats(self) -> Dict[str, Any]:
         """Get overall summary statistics."""
         conn = self._get_conn()
-        
+
         # Total calls
         total_calls = conn.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0]
-        
+
         # Total syncs
         total_syncs = conn.execute("SELECT COUNT(*) FROM sync_metrics").fetchone()[0]
-        
+
         # Average sync duration
-        avg_sync = conn.execute("SELECT AVG(duration_ms) FROM sync_metrics").fetchone()[0] or 0
-        
+        avg_sync = (
+            conn.execute("SELECT AVG(duration_ms) FROM sync_metrics").fetchone()[0] or 0
+        )
+
         # Total functions indexed
-        total_functions = conn.execute("SELECT SUM(functions_indexed) FROM sync_metrics").fetchone()[0] or 0
-        
+        total_functions = (
+            conn.execute("SELECT SUM(functions_indexed) FROM sync_metrics").fetchone()[
+                0
+            ]
+            or 0
+        )
+
         # Error rate
-        error_rate = conn.execute("""
+        error_rate = (
+            conn.execute("""
             SELECT 
                 CASE WHEN COUNT(*) > 0 
                 THEN CAST(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS REAL) / COUNT(*) * 100
                 ELSE 0 END
             FROM tool_calls
-        """).fetchone()[0] or 0
-        
+        """).fetchone()[0]
+            or 0
+        )
+
         return {
             "total_tool_calls": total_calls,
             "total_syncs": total_syncs,

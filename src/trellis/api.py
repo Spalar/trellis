@@ -6,7 +6,7 @@ Serves graph data from code-graph-mcp bridge.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -53,10 +53,10 @@ async def get_graph(project_id: str):
         # Resolve project path
         project_path = _resolve_project_path(project_id)
         bridge = get_bridge(str(project_path))
-        
+
         graph = bridge.get_graph_for_visualizer(max_nodes=200)
         return JSONResponse(content=graph)
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -67,10 +67,10 @@ async def get_impact_graph(project_id: str, symbol: str):
     try:
         project_path = _resolve_project_path(project_id)
         bridge = get_bridge(str(project_path))
-        
+
         graph = bridge.get_impact_graph(symbol)
         return JSONResponse(content=graph)
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -81,10 +81,10 @@ async def search_nodes(project_id: str, q: str, limit: int = 20):
     try:
         project_path = _resolve_project_path(project_id)
         bridge = get_bridge(str(project_path))
-        
+
         results = bridge.search(q, limit=limit)
         return JSONResponse(content={"results": results})
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -95,10 +95,10 @@ async def get_node_details(project_id: str, symbol: str):
     try:
         project_path = _resolve_project_path(project_id)
         bridge = get_bridge(str(project_path))
-        
+
         node = bridge.get_ast_node(symbol)
         return JSONResponse(content=node)
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -109,10 +109,10 @@ async def get_module(project_id: str, module_path: str):
     try:
         project_path = _resolve_project_path(project_id)
         bridge = get_bridge(str(project_path))
-        
+
         module = bridge.module_overview(module_path)
         return JSONResponse(content=module)
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -120,16 +120,16 @@ async def get_module(project_id: str, module_path: str):
 @app.get("/feature/{project_id}/impact/{symbol}")
 async def get_feature_impact(project_id: str, symbol: str, depth: int = 2):
     """Get feature-level impact analysis.
-    
+
     Returns technical impact + feature context + development pointers.
     """
     try:
         project_path = _resolve_project_path(project_id)
         bridge = get_bridge(str(project_path))
-        
+
         report = bridge.get_feature_impact(symbol, depth=depth)
         return JSONResponse(content=report)
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -140,13 +140,13 @@ async def get_feature_context(project_id: str, symbol: str):
     try:
         project_path = _resolve_project_path(project_id)
         bridge = get_bridge(str(project_path))
-        
+
         context = bridge.get_feature_context(symbol)
         if context:
             return JSONResponse(content=context)
         else:
             raise HTTPException(status_code=404, detail="No feature context found")
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -157,10 +157,10 @@ async def get_development_pointers(project_id: str, symbol: str):
     try:
         project_path = _resolve_project_path(project_id)
         bridge = get_bridge(str(project_path))
-        
+
         pointers = bridge.get_development_pointers(symbol)
         return JSONResponse(content={"pointers": pointers})
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -171,14 +171,16 @@ async def check_divergence(project_id: str, symbol: str):
     try:
         project_path = _resolve_project_path(project_id)
         bridge = get_bridge(str(project_path))
-        
+
         warnings = bridge.check_feature_divergence(symbol)
-        return JSONResponse(content={
-            "symbol": symbol,
-            "divergence_warnings": warnings,
-            "has_divergence": len(warnings) > 0
-        })
-        
+        return JSONResponse(
+            content={
+                "symbol": symbol,
+                "divergence_warnings": warnings,
+                "has_divergence": len(warnings) > 0,
+            }
+        )
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -189,17 +191,17 @@ async def health_check(project_id: str):
     try:
         project_path = _resolve_project_path(project_id)
         bridge = get_bridge(str(project_path))
-        
+
         health = bridge.health_check()
         return JSONResponse(content=health)
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 def _resolve_project_path(project_id: str) -> Path:
     """Resolve project ID to path.
-    
+
     Supports:
     - Absolute paths
     - Relative paths from current directory
@@ -207,25 +209,26 @@ def _resolve_project_path(project_id: str) -> Path:
     """
     if project_id == "trellis":
         return Path(__file__).parent.parent.parent
-    
+
     path = Path(project_id)
     if path.is_absolute():
         return path
-    
+
     # Try relative to current directory
     if path.exists():
         return path.resolve()
-    
+
     # Try relative to trellis root
     trellis_root = Path(__file__).parent.parent.parent
     candidate = trellis_root / project_id
     if candidate.exists():
         return candidate.resolve()
-    
+
     raise ValueError(f"Project not found: {project_id}")
 
 
 # For direct execution
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=17318)

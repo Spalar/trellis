@@ -7,7 +7,12 @@ from fastmcp.exceptions import ToolError
 
 
 def _is_no_auth_enabled() -> bool:
-    return os.getenv("TRELLIS_ALLOW_NO_AUTH", "").strip().lower() in {"1", "true", "yes", "on"}
+    return os.getenv("TRELLIS_ALLOW_NO_AUTH", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def validate_auth(request_headers: dict) -> None:

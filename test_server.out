@@ -1,0 +1,14 @@
+INFO:     127.0.0.1:39664 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39668 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39671 - "GET /projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39673 - "GET /mcp HTTP/1.1" 406 Not Acceptable
+INFO:     127.0.0.1:39676 - "GET /mcp/ HTTP/1.1" 307 Temporary Redirect
+INFO:     127.0.0.1:59454 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59456 - "POST /mcp/ HTTP/1.1" 307 Temporary Redirect
+INFO:     127.0.0.1:59456 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:8329 - "POST /mcp HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:2015 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:2018 - "POST /mcp HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:55745 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55748 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55750 - "POST /mcp HTTP/1.1" 200 OK

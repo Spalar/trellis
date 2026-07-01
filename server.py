@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -16,14 +17,18 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
 
 import time
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict
+
+if TYPE_CHECKING:
+    from src.trellis import CodeGraphBridge
 
 from analytics import AnalyticsStore
-from auth import validate_auth
 from spec_manager import SpecManager
 
-# Load environment variables from .env file
-load_dotenv(Path(__file__).with_name(".env"))
+# Load environment variables from .env file in development only.
+# In the bundled release, environment defaults are set by src/trellis/launcher.py.
+if not getattr(sys, "frozen", False):
+    load_dotenv(Path(__file__).with_name(".env"))
 
 # Ensure banner is suppressed via env var
 if os.environ.get("FASTMCP_SHOW_SERVER_BANNER") is None:
@@ -52,53 +57,53 @@ _bridge_cache: Dict[str, "CodeGraphBridge"] = {}
 
 def _resolve_project_path(project_id: str) -> str:
     """Resolve project ID to actual path.
-    
+
     Searches multiple locations and prefers paths with a .git directory.
     Never resolves to a directory inside the trellis repo to avoid polluting it.
     """
     if project_id == "trellis":
         return str(Path(__file__).parent)
-    
+
     path = Path(project_id)
     trellis_root = Path(__file__).parent.resolve()
-    
+
     if path.is_absolute() and path.exists():
         resolved = path.resolve()
         # Don't allow resolving to inside trellis unless it's trellis itself
         if not _is_inside_trellis(resolved, trellis_root):
             return str(resolved)
-    
+
     # Collect all candidate paths (excluding trellis internals)
     candidates = []
-    
+
     # 1. Relative to current directory
     if path.exists():
         resolved = path.resolve()
         if not _is_inside_trellis(resolved, trellis_root):
             candidates.append(resolved)
-    
+
     # 2. Sibling of trellis root (common pattern: repos/ProjectName)
     sibling = trellis_root.parent / project_id
     if sibling.exists() and sibling.resolve() not in candidates:
         candidates.append(sibling.resolve())
-    
+
     # 3. Parent of current directory
     parent_sibling = Path.cwd().parent / project_id
     if parent_sibling.exists() and parent_sibling.resolve() not in candidates:
         candidates.append(parent_sibling.resolve())
-    
+
     # 4. Check if user provided absolute path that doesn't exist yet
     if path.is_absolute():
         return str(path)
-    
+
     if not candidates:
         return project_id  # Fallback
-    
+
     # Prefer the candidate with a .git directory
     for candidate in candidates:
         if (candidate / ".git").exists():
             return str(candidate)
-    
+
     # Otherwise return the first candidate
     return str(candidates[0])
 
@@ -116,6 +121,7 @@ def _get_bridge(project_id: str) -> "CodeGraphBridge":
     """Get or create bridge for project."""
     if project_id not in _bridge_cache:
         from src.trellis import CodeGraphBridge
+
         resolved = _resolve_project_path(project_id)
         _bridge_cache[project_id] = CodeGraphBridge(resolved)
     return _bridge_cache[project_id]
@@ -123,14 +129,16 @@ def _get_bridge(project_id: str) -> "CodeGraphBridge":
 
 def _track_tool(tool_name: str):
     """Decorator to track tool calls with timing."""
+
     def decorator(func):
         import functools
+
         @functools.wraps(func)
         async def wrapper(project_id: str = "", **kwargs):
             start = time.perf_counter()
             status = "success"
             error_msg = None
-            
+
             try:
                 result = await func(project_id=project_id, **kwargs)
                 return result
@@ -147,14 +155,16 @@ def _track_tool(tool_name: str):
                     project_id=project_id,
                     error_message=error_msg,
                 )
-        
+
         return wrapper
+
     return decorator
 
 
 # ------------------------------------------------------------------
 # MCP Tools
 # ------------------------------------------------------------------
+
 
 @mcp.tool()
 @_track_tool("trellis_sync")
@@ -165,46 +175,47 @@ async def trellis_sync(
     incremental: bool = False,
 ) -> str:
     """Sync a project repository into the graph.
-    
+
     Uses code-graph-mcp to index the codebase.
     """
     try:
-        resolved = _resolve_project_path(repo_path or project_id)
-        
         # Clear bridge cache for this project to avoid DB lock conflicts
         cache_key = repo_path or project_id
         if cache_key in _bridge_cache:
             _bridge_cache[cache_key].close()
             del _bridge_cache[cache_key]
-        
+
         bridge = _get_bridge(cache_key)
-        
+
         # Trigger actual indexing
         if incremental:
             sync_result = bridge.incremental_sync()
         else:
             sync_result = bridge.sync_project()
-        
+
         # After sync, we need a fresh bridge since the old one closed its process
         if cache_key in _bridge_cache:
             _bridge_cache[cache_key].close()
             del _bridge_cache[cache_key]
-        
+
         # Get fresh bridge for health check
         bridge = _get_bridge(cache_key)
         health = bridge.health_check()
-        
-        return json.dumps({
-            "status": "ok",
-            "project_id": project_id,
-            "nodes": health.get("nodes_count", 0),
-            "files": health.get("files_count", 0),
-            "message": "Project synced successfully",
-            "sync_details": sync_result,
-        }, indent=2)
+
+        return json.dumps(
+            {
+                "status": "ok",
+                "project_id": project_id,
+                "nodes": health.get("nodes_count", 0),
+                "files": health.get("files_count", 0),
+                "message": "Project synced successfully",
+                "sync_details": sync_result,
+            },
+            indent=2,
+        )
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
-    
+
 
 @mcp.tool()
 @_track_tool("trellis_get_feature")
@@ -229,15 +240,15 @@ async def trellis_analyze_impact(
     depth_mode: str = "standard",
 ) -> str:
     """Analyze impact of changing a function.
-    
+
     Returns both technical and feature-level impact.
     """
     try:
         bridge = _get_bridge(project_id)
-        
+
         # Get feature impact report
         report = bridge.get_feature_impact(function_path, depth=3)
-        
+
         # Format for MCP
         result = {
             "symbol": function_path,
@@ -253,10 +264,12 @@ async def trellis_analyze_impact(
                 }
                 for fi in report.get("feature_impacts", [])
             ],
-            "development_pointers": report.get("development_pointers", [])[:10],  # Limit
+            "development_pointers": report.get("development_pointers", [])[
+                :10
+            ],  # Limit
             "divergence_warnings": report.get("divergence_warnings", []),
         }
-        
+
         return json.dumps(result, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
@@ -269,46 +282,51 @@ async def trellis_get_function(
     function_path: str = "",
 ) -> str:
     """Get details for a specific function.
-    
+
     function_path can be:
     - Just the function name: "create_llm"
-    - Qualified name: "AIFactory.create_llm" 
+    - Qualified name: "AIFactory.create_llm"
     - File:function format: "backend/ai/factory.py:create_llm"
     """
     try:
         bridge = _get_bridge(project_id)
-        
+
         # Handle file:function format by extracting just the function name
         symbol = function_path
         if ":" in function_path:
             symbol = function_path.split(":")[-1]
-        
+
         # Try direct lookup first
         node = bridge.get_ast_node(symbol)
-        
+
         # If not found, try searching by name in SQLite
-        if not node or (isinstance(node, dict) and ("error" in node or not node.get("name"))):
+        if not node or (
+            isinstance(node, dict) and ("error" in node or not node.get("name"))
+        ):
             import sqlite3
             from src.trellis.utils import resolve_code_graph_db
-            
+
             db_path = resolve_code_graph_db(bridge.project_path)
             if db_path.exists():
                 conn = sqlite3.connect(str(db_path))
                 cursor = conn.cursor()
-                
+
                 # Search by name or qualified_name
-                cursor.execute("""
+                cursor.execute(
+                    """
                     SELECT n.name, n.qualified_name, f.path, n.start_line, n.end_line, n.type, n.signature, n.code_content
                     FROM nodes n
                     JOIN files f ON n.file_id = f.id
                     WHERE (n.name = ? OR n.qualified_name = ?)
                       AND n.type IN ('function', 'method')
                     LIMIT 5
-                """, (symbol, symbol))
-                
+                """,
+                    (symbol, symbol),
+                )
+
                 rows = cursor.fetchall()
                 conn.close()
-                
+
                 if rows:
                     # Return the first match
                     row = rows[0]
@@ -324,7 +342,7 @@ async def trellis_get_function(
                     }
                 else:
                     node = {"error": f"Function '{symbol}' not found in index"}
-        
+
         return json.dumps(node, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
@@ -356,15 +374,39 @@ async def trellis_list_features(
         bridge = _get_bridge(project_id)
         pmap = bridge.project_map()
         modules = pmap.get("modules", [])
-        return json.dumps({
-            "features": [
-                {
-                    "name": m.get("path", "unknown"),
-                    "symbol_count": m.get("symbol_count", 0),
-                }
-                for m in modules
-            ]
-        }, indent=2)
+        return json.dumps(
+            {
+                "features": [
+                    {
+                        "name": m.get("path", "unknown"),
+                        "symbol_count": m.get("symbol_count", 0),
+                    }
+                    for m in modules
+                ]
+            },
+            indent=2,
+        )
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+@_track_tool("trellis_feature_info")
+async def trellis_feature_info(
+    project_id: str = "",
+    feature_name: str = "",
+) -> str:
+    """Get comprehensive information about a feature.
+
+    Returns project.md spec, related knowledge notes, all functions in the
+    feature, and the most central (hot) functions for blast-radius analysis.
+
+    Example: trellis_feature_info(project_id='tui-image-editor', feature_name='Icons')
+    """
+    try:
+        bridge = _get_bridge(project_id)
+        info = bridge.get_feature_info(feature_name)
+        return json.dumps(info, indent=2, default=str)
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
 
@@ -377,46 +419,56 @@ async def trellis_trace_path(
     to_feature: str = "",
 ) -> str:
     """Trace dependency path between two features/modules.
-    
+
     Features can be module paths like "backend/ai/providers" or "backend/chat".
     """
     try:
         bridge = _get_bridge(project_id)
-        
+
         # Use SQLite to find connections between modules
         import sqlite3
         from src.trellis.utils import resolve_code_graph_db
-        
+
         db_path = resolve_code_graph_db(bridge.project_path)
         if not db_path.exists():
-            return json.dumps({"error": "No code-graph database found. Run trellis_sync first."}, indent=2)
-        
+            return json.dumps(
+                {"error": "No code-graph database found. Run trellis_sync first."},
+                indent=2,
+            )
+
         conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
-        
+
         # Find files in from_feature module
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT DISTINCT f.path 
             FROM files f 
             WHERE f.path LIKE ?
-        """, (f"%{from_feature}%",))
+        """,
+            (f"%{from_feature}%",),
+        )
         from_files = [row[0] for row in cursor.fetchall()]
-        
+
         # Find files in to_feature module
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT DISTINCT f.path 
             FROM files f 
             WHERE f.path LIKE ?
-        """, (f"%{to_feature}%",))
+        """,
+            (f"%{to_feature}%",),
+        )
         to_files = [row[0] for row in cursor.fetchall()]
-        
+
         if not from_files:
             return json.dumps({"error": f"Module '{from_feature}' not found"}, indent=2)
         if not to_files:
             return json.dumps({"error": f"Module '{to_feature}' not found"}, indent=2)
-        
+
         # Find import/call edges between the modules
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT DISTINCT 
                 sf.path as from_file,
                 tf.path as to_file,
@@ -431,29 +483,36 @@ async def trellis_trace_path(
               AND sf.path LIKE ?
               AND tf.path LIKE ?
             LIMIT 20
-        """, (f"%{from_feature}%", f"%{to_feature}%"))
-        
+        """,
+            (f"%{from_feature}%", f"%{to_feature}%"),
+        )
+
         direct_connections = []
         for row in cursor.fetchall():
-            direct_connections.append({
-                "from_file": row[0],
-                "to_file": row[1],
-                "symbol": row[2],
-                "relation": row[3]
-            })
-        
+            direct_connections.append(
+                {
+                    "from_file": row[0],
+                    "to_file": row[1],
+                    "symbol": row[2],
+                    "relation": row[3],
+                }
+            )
+
         conn.close()
-        
-        return json.dumps({
-            "from_feature": from_feature,
-            "to_feature": to_feature,
-            "from_files_count": len(from_files),
-            "to_files_count": len(to_files),
-            "direct_connections": direct_connections,
-            "connection_count": len(direct_connections),
-            "from_files_sample": from_files[:5],
-            "to_files_sample": to_files[:5],
-        }, indent=2)
+
+        return json.dumps(
+            {
+                "from_feature": from_feature,
+                "to_feature": to_feature,
+                "from_files_count": len(from_files),
+                "to_files_count": len(to_files),
+                "direct_connections": direct_connections,
+                "connection_count": len(direct_connections),
+                "from_files_sample": from_files[:5],
+                "to_files_sample": to_files[:5],
+            },
+            indent=2,
+        )
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
 
@@ -495,9 +554,9 @@ async def trellis_analyze_diff(
     compare_branch: str = "",
 ) -> str:
     """Analyze impact of a code diff.
-    
+
     Automatically detects changed functions from git diff and runs impact analysis.
-    
+
     Args:
         project_id: Project to analyze
         diff: Optional raw diff string. If not provided, fetches from git.
@@ -507,18 +566,19 @@ async def trellis_analyze_diff(
         import re
         import sqlite3
         from src.trellis.utils import resolve_code_graph_db
-        
+
         resolved = _resolve_project_path(project_id)
-        
+
         # Resolve symlinks/junctions to real path for git operations
         resolved_real = str(Path(resolved).resolve())
-        
+
         # Step 1: Get diff if not provided
         if not diff:
             try:
                 import git
+
                 repo = git.Repo(resolved_real)
-                
+
                 # Determine what to diff against
                 if compare_branch:
                     target = compare_branch
@@ -535,90 +595,103 @@ async def trellis_analyze_diff(
                         # No remote branch, get unstaged changes
                         diff = repo.git.diff()
                         target = None
-                
+
                 if target and not diff:
                     diff = repo.git.diff(target)
-                
+
                 if not diff:
-                    return json.dumps({
-                        "status": "no_changes",
-                        "message": "No changes detected in git working tree",
-                        "project": project_id,
-                    }, indent=2)
-                    
+                    return json.dumps(
+                        {
+                            "status": "no_changes",
+                            "message": "No changes detected in git working tree",
+                            "project": project_id,
+                        },
+                        indent=2,
+                    )
+
             except ImportError:
-                return json.dumps({
-                    "error": "GitPython not installed. Either install it (pip install GitPython) or provide the diff parameter directly: trellis_analyze_diff(project_id='...', diff='...')",
-                }, indent=2)
+                return json.dumps(
+                    {
+                        "error": "GitPython not installed. Either install it (pip install GitPython) or provide the diff parameter directly: trellis_analyze_diff(project_id='...', diff='...')",
+                    },
+                    indent=2,
+                )
             except git.InvalidGitRepositoryError:
-                return json.dumps({
-                    "error": f"'{resolved_real}' is not a git repository.\n\nTo fix:\n1. Pass the absolute path: trellis_analyze_diff(project_id='/path/to/repo')\n2. Or provide the diff directly: trellis_analyze_diff(project_id='{project_id}', diff='...')",
-                }, indent=2)
-        
+                return json.dumps(
+                    {
+                        "error": f"'{resolved_real}' is not a git repository.\n\nTo fix:\n1. Pass the absolute path: trellis_analyze_diff(project_id='/path/to/repo')\n2. Or provide the diff directly: trellis_analyze_diff(project_id='{project_id}', diff='...')",
+                    },
+                    indent=2,
+                )
+
         # Step 2: Parse unified diff to find changed files and line numbers
         changed_files = {}  # file_path -> set of changed line numbers
         current_file = None
         current_line = 0
-        
-        for line in diff.split('\n'):
+
+        for line in diff.split("\n"):
             # File header: --- a/path or +++ b/path
-            if line.startswith('--- ') or line.startswith('+++ '):
+            if line.startswith("--- ") or line.startswith("+++ "):
                 # Extract file path, skip /dev/null
-                path = line[4:].split('\t')[0]
-                if path.startswith('a/'):
+                path = line[4:].split("\t")[0]
+                if path.startswith("a/"):
                     path = path[2:]
-                elif path.startswith('b/'):
+                elif path.startswith("b/"):
                     path = path[2:]
-                if path != '/dev/null':
+                if path != "/dev/null":
                     current_file = path
                     if current_file not in changed_files:
                         changed_files[current_file] = set()
-            
+
             # Hunk header: @@ -old_start,old_len +new_start,new_len @@
-            elif line.startswith('@@') and current_file:
-                match = re.match(r'@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@', line)
+            elif line.startswith("@@") and current_file:
+                match = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
                 if match:
                     current_line = int(match.group(1))
-            
+
             # Added line (in new file)
-            elif line.startswith('+') and not line.startswith('+++') and current_file:
+            elif line.startswith("+") and not line.startswith("+++") and current_file:
                 changed_files[current_file].add(current_line)
                 current_line += 1
-            
+
             # Removed line (skip in new file line counting)
-            elif line.startswith('-') and not line.startswith('---') and current_file:
+            elif line.startswith("-") and not line.startswith("---") and current_file:
                 # Line was removed, note it but don't increment counter
                 pass
-            
+
             # Context line
-            elif current_file and not line.startswith('\\'):
+            elif current_file and not line.startswith("\\"):
                 current_line += 1
-        
+
         # Filter out files with no actual line changes
         changed_files = {f: lines for f, lines in changed_files.items() if lines}
-        
+
         if not changed_files:
-            return json.dumps({
-                "status": "no_changes",
-                "message": "No file changes detected in diff",
-                "diff_length": len(diff),
-            }, indent=2)
-        
+            return json.dumps(
+                {
+                    "status": "no_changes",
+                    "message": "No file changes detected in diff",
+                    "diff_length": len(diff),
+                },
+                indent=2,
+            )
+
         # Step 3: Query SQLite to find affected functions
         db_path = resolve_code_graph_db(resolved)
         affected_functions = []
-        
+
         if db_path.exists():
             try:
                 conn = sqlite3.connect(str(db_path))
                 cursor = conn.cursor()
-                
+
                 for file_path, line_numbers in changed_files.items():
                     if not line_numbers:
                         continue
-                    
+
                     # Find functions in this file that overlap with changed lines
-                    cursor.execute("""
+                    cursor.execute(
+                        """
                         SELECT DISTINCT n.name, n.qualified_name, f.path, 
                                n.start_line, n.end_line, n.type
                         FROM nodes n
@@ -627,91 +700,110 @@ async def trellis_analyze_diff(
                           AND n.type IN ('function', 'method', 'class')
                           AND n.start_line <= ?
                           AND n.end_line >= ?
-                    """, (f'%{file_path}%', max(line_numbers), min(line_numbers)))
-                    
+                    """,
+                        (f"%{file_path}%", max(line_numbers), min(line_numbers)),
+                    )
+
                     for row in cursor.fetchall():
                         # Verify actual overlap with changed lines
                         func_start, func_end = row[3], row[4]
-                        changed_in_func = [line for line in line_numbers if func_start <= line <= func_end]
-                        
+                        changed_in_func = [
+                            line
+                            for line in line_numbers
+                            if func_start <= line <= func_end
+                        ]
+
                         if changed_in_func:
-                            affected_functions.append({
-                                "name": row[0],
-                                "qualified_name": row[1] or row[0],
-                                "file_path": row[2],
-                                "type": row[5],
-                                "changed_lines": len(changed_in_func),
-                                "line_range": [func_start, func_end],
-                            })
-                
+                            affected_functions.append(
+                                {
+                                    "name": row[0],
+                                    "qualified_name": row[1] or row[0],
+                                    "file_path": row[2],
+                                    "type": row[5],
+                                    "changed_lines": len(changed_in_func),
+                                    "line_range": [func_start, func_end],
+                                }
+                            )
+
                 conn.close()
             except Exception:
                 # Continue without function-level details
                 pass
-        
+
         # Step 4: Run impact analysis on unique affected functions
         bridge = _get_bridge(project_id)
         impact_results = []
         analyzed_symbols = set()
-        
+
         for func in affected_functions:
             symbol = func["qualified_name"] or func["name"]
             if symbol in analyzed_symbols:
                 continue
             analyzed_symbols.add(symbol)
-            
+
             try:
                 report = bridge.get_feature_impact(symbol, depth=2)
-                impact_results.append({
-                    "symbol": symbol,
-                    "file_path": func["file_path"],
-                    "type": func["type"],
-                    "changed_lines": func["changed_lines"],
-                    "risk_level": report.get("risk_level", "unknown"),
-                    "affected_functions": report.get("affected_functions_count", 0),
-                    "affected_files": report.get("affected_files_count", 0),
-                    "feature_impacts": [
-                        {
-                            "feature": fi["feature_name"],
-                            "functions": len(fi["impacted_functions"]),
-                        }
-                        for fi in report.get("feature_impacts", [])
-                    ],
-                })
+                impact_results.append(
+                    {
+                        "symbol": symbol,
+                        "file_path": func["file_path"],
+                        "type": func["type"],
+                        "changed_lines": func["changed_lines"],
+                        "risk_level": report.get("risk_level", "unknown"),
+                        "affected_functions": report.get("affected_functions_count", 0),
+                        "affected_files": report.get("affected_files_count", 0),
+                        "feature_impacts": [
+                            {
+                                "feature": fi["feature_name"],
+                                "functions": len(fi["impacted_functions"]),
+                            }
+                            for fi in report.get("feature_impacts", [])
+                        ],
+                    }
+                )
             except Exception as e:
-                impact_results.append({
-                    "symbol": symbol,
-                    "file_path": func["file_path"],
-                    "error": str(e),
-                })
-        
+                impact_results.append(
+                    {
+                        "symbol": symbol,
+                        "file_path": func["file_path"],
+                        "error": str(e),
+                    }
+                )
+
         # Step 5: Calculate overall risk
         risk_scores = {"critical": 4, "high": 3, "medium": 2, "low": 1, "unknown": 0}
         max_risk = max(
-            [risk_scores.get(r["risk_level"], 0) for r in impact_results if "risk_level" in r],
-            default=0
+            [
+                risk_scores.get(r["risk_level"], 0)
+                for r in impact_results
+                if "risk_level" in r
+            ],
+            default=0,
         )
         risk_labels = {4: "critical", 3: "high", 2: "medium", 1: "low", 0: "unknown"}
         overall_risk = risk_labels.get(max_risk, "unknown")
-        
+
         total_affected_funcs = sum(
-            r.get("affected_functions", 0) 
-            for r in impact_results 
+            r.get("affected_functions", 0)
+            for r in impact_results
             if "affected_functions" in r
         )
-        
-        return json.dumps({
-            "status": "ok",
-            "project": project_id,
-            "overall_risk": overall_risk,
-            "changed_files_count": len(changed_files),
-            "changed_files": list(changed_files.keys()),
-            "affected_functions_count": len(affected_functions),
-            "unique_functions_analyzed": len(impact_results),
-            "total_downstream_affected": total_affected_funcs,
-            "functions": impact_results,
-        }, indent=2)
-        
+
+        return json.dumps(
+            {
+                "status": "ok",
+                "project": project_id,
+                "overall_risk": overall_risk,
+                "changed_files_count": len(changed_files),
+                "changed_files": list(changed_files.keys()),
+                "affected_functions_count": len(affected_functions),
+                "unique_functions_analyzed": len(impact_results),
+                "total_downstream_affected": total_affected_funcs,
+                "functions": impact_results,
+            },
+            indent=2,
+        )
+
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
 
@@ -727,10 +819,13 @@ async def trellis_get_boundary_map(
         pmap = bridge.project_map()
         modules = pmap.get("modules", [])
         deps = pmap.get("module_dependencies", [])
-        return json.dumps({
-            "modules": [m.get("path") for m in modules],
-            "dependencies": deps,
-        }, indent=2)
+        return json.dumps(
+            {
+                "modules": [m.get("path") for m in modules],
+                "dependencies": deps,
+            },
+            indent=2,
+        )
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
 
@@ -738,6 +833,7 @@ async def trellis_get_boundary_map(
 # ------------------------------------------------------------------
 # Knowledge Graph Tools
 # ------------------------------------------------------------------
+
 
 @mcp.tool()
 @_track_tool("trellis_create_note")
@@ -749,25 +845,28 @@ async def trellis_create_note(
     tags: str = "",
 ) -> str:
     """Create or update a knowledge note.
-    
+
     Notes support markdown with [[links]] and @mentions.
     """
     try:
         from src.trellis.knowledge_graph import NoteGraph
-        
+
         resolved = _resolve_project_path(project_id)
         graph = NoteGraph(resolved)
-        
+
         tag_list = [t.strip() for t in tags.split(",")] if tags else []
         note = graph.save_note(note_id, content, title=title, tags=tag_list)
-        
-        return json.dumps({
-            "status": "ok",
-            "note_id": note.id,
-            "title": note.title,
-            "links": note.links,
-            "mentions": note.mentions,
-        }, indent=2)
+
+        return json.dumps(
+            {
+                "status": "ok",
+                "note_id": note.id,
+                "title": note.title,
+                "links": note.links,
+                "mentions": note.mentions,
+            },
+            indent=2,
+        )
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
 
@@ -781,25 +880,28 @@ async def trellis_get_note(
     """Get a knowledge note by ID."""
     try:
         from src.trellis.knowledge_graph import NoteGraph
-        
+
         resolved = _resolve_project_path(project_id)
         graph = NoteGraph(resolved)
         note = graph.get_note(note_id)
-        
+
         if not note:
             return json.dumps({"error": f"Note '{note_id}' not found"}, indent=2)
-        
-        return json.dumps({
-            "id": note.id,
-            "title": note.title,
-            "content": note.content,
-            "tags": note.tags,
-            "links": note.links,
-            "mentions": note.mentions,
-            "backlinks": graph.get_backlinks(note_id),
-            "created": note.created_at,
-            "updated": note.updated_at,
-        }, indent=2)
+
+        return json.dumps(
+            {
+                "id": note.id,
+                "title": note.title,
+                "content": note.content,
+                "tags": note.tags,
+                "links": note.links,
+                "mentions": note.mentions,
+                "backlinks": graph.get_backlinks(note_id),
+                "created": note.created_at,
+                "updated": note.updated_at,
+            },
+            indent=2,
+        )
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
 
@@ -813,23 +915,28 @@ async def trellis_search_notes(
     """Search knowledge notes by content."""
     try:
         from src.trellis.knowledge_graph import NoteGraph
-        
+
         resolved = _resolve_project_path(project_id)
         graph = NoteGraph(resolved)
         results = graph.search_notes(query)
-        
-        return json.dumps({
-            "query": query,
-            "results": [
-                {
-                    "id": n.id,
-                    "title": n.title,
-                    "excerpt": n.content[:200] + "..." if len(n.content) > 200 else n.content,
-                    "tags": n.tags,
-                }
-                for n in results
-            ]
-        }, indent=2)
+
+        return json.dumps(
+            {
+                "query": query,
+                "results": [
+                    {
+                        "id": n.id,
+                        "title": n.title,
+                        "excerpt": n.content[:200] + "..."
+                        if len(n.content) > 200
+                        else n.content,
+                        "tags": n.tags,
+                    }
+                    for n in results
+                ],
+            },
+            indent=2,
+        )
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
 
@@ -843,15 +950,20 @@ async def trellis_delete_note(
     """Delete a knowledge note."""
     try:
         from src.trellis.knowledge_graph import NoteGraph
-        
+
         resolved = _resolve_project_path(project_id)
         graph = NoteGraph(resolved)
         success = graph.delete_note(note_id)
-        
-        return json.dumps({
-            "status": "ok" if success else "error",
-            "message": f"Note '{note_id}' deleted" if success else f"Note '{note_id}' not found",
-        }, indent=2)
+
+        return json.dumps(
+            {
+                "status": "ok" if success else "error",
+                "message": f"Note '{note_id}' deleted"
+                if success
+                else f"Note '{note_id}' not found",
+            },
+            indent=2,
+        )
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
 
@@ -864,11 +976,11 @@ async def trellis_knowledge_graph(
     """Get the full knowledge graph (notes + code nodes + edges)."""
     try:
         from src.trellis.knowledge_graph import NoteGraph
-        
+
         resolved = _resolve_project_path(project_id)
         graph = NoteGraph(resolved)
         data = graph.build_graph(include_code=True)
-        
+
         return json.dumps(data, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
@@ -877,6 +989,7 @@ async def trellis_knowledge_graph(
 # ------------------------------------------------------------------
 # HTTP Routes
 # ------------------------------------------------------------------
+
 
 @mcp.custom_route("/", methods=["GET"])
 async def root(request: Request):
@@ -948,22 +1061,26 @@ async def feature_pointers(request: Request):
 async def spec_handler(request: Request):
     """Handle project spec."""
     project_id = request.path_params["project_id"]
-    
+
     if request.method == "GET":
         spec = _spec_manager.load_spec(project_id)
         if spec is None:
             template = _spec_manager.create_template(project_id)
-            return JSONResponse({
+            return JSONResponse(
+                {
+                    "project_id": project_id,
+                    "status": "no_spec",
+                    "content": template,
+                }
+            )
+        return JSONResponse(
+            {
                 "project_id": project_id,
-                "status": "no_spec",
-                "content": template,
-            })
-        return JSONResponse({
-            "project_id": project_id,
-            "status": "ok",
-            "content": spec.content,
-        })
-    
+                "status": "ok",
+                "content": spec.content,
+            }
+        )
+
     else:  # POST
         body = await request.json()
         content = body.get("content", "")
@@ -986,6 +1103,7 @@ async def knowledge_graph_get(request: Request):
     project_id = request.path_params["project_id"]
     try:
         from src.trellis.knowledge_graph import NoteGraph
+
         resolved = _resolve_project_path(project_id)
         graph = NoteGraph(resolved)
         data = graph.build_graph(include_code=True)
@@ -999,37 +1117,48 @@ async def note_handler(request: Request):
     """Get, save, or delete a knowledge note."""
     project_id = request.path_params["project_id"]
     note_id = request.path_params["note_id"]
-    
+
     try:
         from src.trellis.knowledge_graph import NoteGraph
+
         resolved = _resolve_project_path(project_id)
         graph = NoteGraph(resolved)
-        
+
         if request.method == "GET":
             note = graph.get_note(note_id)
             if not note:
-                return JSONResponse({"error": f"Note '{note_id}' not found"}, status_code=404)
-            return JSONResponse({
-                "id": note.id,
-                "title": note.title,
-                "content": note.content,
-                "tags": note.tags,
-                "links": note.links,
-                "mentions": note.mentions,
-                "backlinks": graph.get_backlinks(note_id),
-            })
+                return JSONResponse(
+                    {"error": f"Note '{note_id}' not found"}, status_code=404
+                )
+            return JSONResponse(
+                {
+                    "id": note.id,
+                    "title": note.title,
+                    "content": note.content,
+                    "tags": note.tags,
+                    "links": note.links,
+                    "mentions": note.mentions,
+                    "backlinks": graph.get_backlinks(note_id),
+                }
+            )
         elif request.method == "POST":
             body = await request.json()
             content = body.get("content", "")
             title = body.get("title", note_id)
             tags = body.get("tags", [])
             note = graph.save_note(note_id, content, title=title, tags=tags)
-            return JSONResponse({"status": "ok", "note_id": note.id, "title": note.title})
+            return JSONResponse(
+                {"status": "ok", "note_id": note.id, "title": note.title}
+            )
         elif request.method == "DELETE":
             success = graph.delete_note(note_id)
             if not success:
-                return JSONResponse({"error": f"Note '{note_id}' not found"}, status_code=404)
-            return JSONResponse({"status": "ok", "message": f"Note '{note_id}' deleted"})
+                return JSONResponse(
+                    {"error": f"Note '{note_id}' not found"}, status_code=404
+                )
+            return JSONResponse(
+                {"status": "ok", "message": f"Note '{note_id}' deleted"}
+            )
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -1040,6 +1169,7 @@ async def notes_list(request: Request):
     project_id = request.path_params["project_id"]
     try:
         from src.trellis.knowledge_graph import NoteGraph
+
         resolved = _resolve_project_path(project_id)
         graph = NoteGraph(resolved)
         notes = [
@@ -1056,221 +1186,96 @@ async def notes_list(request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@mcp.custom_route("/feature/{project_id}/context/{symbol}", methods=["GET"])
+async def feature_context(request: Request):
+    """Get feature context for a symbol."""
+    project_id = request.path_params["project_id"]
+    symbol = request.path_params["symbol"]
+    try:
+        bridge = _get_bridge(project_id)
+        context = bridge.get_feature_context(symbol)
+        if context:
+            return JSONResponse(context)
+        return JSONResponse({"error": "No feature context found"}, status_code=404)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/feature/{project_id}/divergence/{symbol}", methods=["GET"])
+async def feature_divergence(request: Request):
+    """Check feature divergence for a symbol."""
+    project_id = request.path_params["project_id"]
+    symbol = request.path_params["symbol"]
+    try:
+        bridge = _get_bridge(project_id)
+        warnings = bridge.check_feature_divergence(symbol)
+        return JSONResponse(
+            {
+                "symbol": symbol,
+                "divergence_warnings": warnings,
+                "has_divergence": len(warnings) > 0,
+            }
+        )
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/projects", methods=["GET"])
+async def list_projects(request: Request):
+    """List synced projects with graph data."""
+    from src.trellis.utils import get_trellis_data_dir
+
+    projects = []
+
+    # Only show projects that have been synced (have .code-graph data)
+    trellis_data = get_trellis_data_dir()
+    projects_dir = trellis_data / "projects"
+    if projects_dir.exists():
+        for item in projects_dir.iterdir():
+            if item.is_dir():
+                code_graph_dir = item / ".code-graph"
+                # Only include if .code-graph exists and has index.db
+                if code_graph_dir.exists() and (code_graph_dir / "index.db").exists():
+                    projects.append(
+                        {
+                            "id": item.name,
+                            "name": item.name,
+                            "path": str(item),
+                        }
+                    )
+
+    return JSONResponse({"projects": projects})
+
+
 # ------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------
 
 if __name__ == "__main__":
+    # When running as a bundled executable, set up the environment and open
+    # the browser automatically. For development via Makefile, environment
+    # variables are already configured.
+    try:
+        from src.trellis.launcher import setup_environment, open_browser
+
+        setup_environment()
+        open_browser()
+    except ImportError:
+        pass
+
     # Determine transport from environment
     transport = os.environ.get("TRELLIS_TRANSPORT", "stdio")
-    
+
     if transport == "stdio":
         mcp.run(transport="stdio")
     else:
-        # HTTP mode - Use FastAPI for REST endpoints
-        from fastapi import FastAPI, HTTPException
-        from fastapi.middleware.cors import CORSMiddleware
-        from fastapi.responses import FileResponse, JSONResponse
+        # HTTP mode - serve REST endpoints, visualizer, and MCP over HTTP
+        # mcp.http_app() includes the custom routes above plus the MCP protocol
+        # endpoint at /mcp, so AI agents can connect via HTTP or stdio.
         import uvicorn
-        
-        http_app = FastAPI(title="Trellis API", version=VERSION)
-        
-        # Enable CORS
-        http_app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
+
+        uvicorn.run(
+            mcp.http_app(),
+            host=os.environ.get("TRELLIS_HOST", "127.0.0.1"),
+            port=int(os.environ.get("TRELLIS_PORT", "17317")),
         )
-        
-        @http_app.get("/")
-        async def root():
-            """Serve visualizer HTML."""
-            visualizer_path = Path(__file__).parent / "visualizer.html"
-            if visualizer_path.exists():
-                return FileResponse(visualizer_path)
-            return {"message": "Trellis MCP Server", "version": VERSION}
-        
-        @http_app.get("/health")
-        async def health():
-            return {"status": "ok", "version": VERSION}
-        
-        @http_app.get("/graph/{project_id}")
-        async def graph_get(project_id: str):
-            try:
-                bridge = _get_bridge(project_id)
-                graph = bridge.get_graph_for_visualizer(max_nodes=200)
-                return graph
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e))
-        
-        @http_app.get("/graph/{project_id}/impact/{symbol}")
-        async def graph_impact(project_id: str, symbol: str):
-            try:
-                bridge = _get_bridge(project_id)
-                graph = bridge.get_impact_graph(symbol)
-                return graph
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e))
-        
-        @http_app.get("/feature/{project_id}/impact/{symbol}")
-        async def feature_impact(project_id: str, symbol: str):
-            try:
-                bridge = _get_bridge(project_id)
-                report = bridge.get_feature_impact(symbol)
-                return report
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e))
-        
-        @http_app.get("/feature/{project_id}/context/{symbol}")
-        async def feature_context(project_id: str, symbol: str):
-            try:
-                bridge = _get_bridge(project_id)
-                context = bridge.get_feature_context(symbol)
-                if context:
-                    return context
-                raise HTTPException(status_code=404, detail="No feature context found")
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e))
-        
-        @http_app.get("/feature/{project_id}/pointers/{symbol}")
-        async def feature_pointers(project_id: str, symbol: str):
-            try:
-                bridge = _get_bridge(project_id)
-                pointers = bridge.get_development_pointers(symbol)
-                return {"pointers": pointers}
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e))
-        
-        @http_app.get("/feature/{project_id}/divergence/{symbol}")
-        async def feature_divergence(project_id: str, symbol: str):
-            try:
-                bridge = _get_bridge(project_id)
-                warnings = bridge.check_feature_divergence(symbol)
-                return {"symbol": symbol, "divergence_warnings": warnings, "has_divergence": len(warnings) > 0}
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e))
-        
-        @http_app.get("/spec/{project_id}")
-        async def spec_get(project_id: str):
-            spec = _spec_manager.load_spec(project_id)
-            if spec is None:
-                template = _spec_manager.create_template(project_id)
-                return {"project_id": project_id, "status": "no_spec", "content": template}
-            return {"project_id": project_id, "status": "ok", "content": spec.content}
-        
-        @http_app.post("/spec/{project_id}")
-        async def spec_post(project_id: str, content: str = ""):
-            _spec_manager.save_spec(project_id, content)
-            return {"project_id": project_id, "status": "ok"}
-        
-        @http_app.get("/analytics")
-        async def analytics_dashboard():
-            dashboard_path = Path(__file__).parent / "analytics.html"
-            if dashboard_path.exists():
-                return FileResponse(dashboard_path)
-            raise HTTPException(status_code=404, detail="Dashboard not found")
-        
-        @http_app.get("/knowledge-graph/{project_id}")
-        async def knowledge_graph_get(project_id: str):
-            try:
-                from src.trellis.knowledge_graph import NoteGraph
-                resolved = _resolve_project_path(project_id)
-                graph = NoteGraph(resolved)
-                data = graph.build_graph(include_code=True)
-                return data
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e))
-        
-        @http_app.get("/note/{project_id}/{note_id}")
-        async def note_get(project_id: str, note_id: str):
-            try:
-                from src.trellis.knowledge_graph import NoteGraph
-                resolved = _resolve_project_path(project_id)
-                graph = NoteGraph(resolved)
-                note = graph.get_note(note_id)
-                if not note:
-                    raise HTTPException(status_code=404, detail=f"Note '{note_id}' not found")
-                return {
-                    "id": note.id,
-                    "title": note.title,
-                    "content": note.content,
-                    "tags": note.tags,
-                    "links": note.links,
-                    "mentions": note.mentions,
-                    "backlinks": graph.get_backlinks(note_id),
-                }
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e))
-        
-        @http_app.post("/note/{project_id}/{note_id}")
-        async def note_post(project_id: str, note_id: str, body: dict):
-            try:
-                from src.trellis.knowledge_graph import NoteGraph
-                resolved = _resolve_project_path(project_id)
-                graph = NoteGraph(resolved)
-                content = body.get("content", "")
-                title = body.get("title", note_id)
-                tags = body.get("tags", [])
-                note = graph.save_note(note_id, content, title=title, tags=tags)
-                return {"status": "ok", "note_id": note.id, "title": note.title}
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e))
-        
-        @http_app.delete("/note/{project_id}/{note_id}")
-        async def note_delete(project_id: str, note_id: str):
-            try:
-                from src.trellis.knowledge_graph import NoteGraph
-                resolved = _resolve_project_path(project_id)
-                graph = NoteGraph(resolved)
-                success = graph.delete_note(note_id)
-                if not success:
-                    raise HTTPException(status_code=404, detail=f"Note '{note_id}' not found")
-                return {"status": "ok", "message": f"Note '{note_id}' deleted"}
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e))
-        
-        @http_app.get("/notes/{project_id}")
-        async def notes_list(project_id: str):
-            try:
-                from src.trellis.knowledge_graph import NoteGraph
-                resolved = _resolve_project_path(project_id)
-                graph = NoteGraph(resolved)
-                notes = [
-                    {
-                        "id": n.id,
-                        "title": n.title,
-                        "tags": n.tags,
-                        "updated": n.updated_at,
-                    }
-                    for n in graph.notes.values()
-                ]
-                return {"notes": notes, "count": len(notes)}
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e))
-        
-        @http_app.get("/projects")
-        async def list_projects():
-            """List synced projects with graph data."""
-            from src.trellis.utils import get_trellis_data_dir
-            projects = []
-            
-            # Only show projects that have been synced (have .code-graph data)
-            trellis_data = get_trellis_data_dir()
-            projects_dir = trellis_data / "projects"
-            if projects_dir.exists():
-                for item in projects_dir.iterdir():
-                    if item.is_dir():
-                        code_graph_dir = item / ".code-graph"
-                        # Only include if .code-graph exists and has index.db
-                        if code_graph_dir.exists() and (code_graph_dir / "index.db").exists():
-                            projects.append({
-                                "id": item.name,
-                                "name": item.name,
-                                "path": str(item),
-                            })
-            
-            return {"projects": projects}
-        
-        uvicorn.run(http_app, host="0.0.0.0", port=17317)

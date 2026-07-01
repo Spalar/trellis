@@ -1,5 +1,8 @@
 .trellis
 
+# External project clones used for Trellis analysis
+tui-image-editor/
+
 # Compiled binaries (auto-built from submodule)
 bin/*
 !bin/.gitkeep

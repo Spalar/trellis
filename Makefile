@@ -43,9 +43,9 @@ run: dev
 run-http:
 	@echo "Starting Trellis in HTTP mode on port 17317 (no-auth local dev)..."
 ifeq ($(OS),Windows_NT)
-	set TRELLIS_TRANSPORT=http && set TRELLIS_HOST=0.0.0.0 && set TRELLIS_PORT=17317 && set TRELLIS_ALLOW_NO_AUTH=true && $(PYTHON_VENV) server.py
+	set TRELLIS_TRANSPORT=http && set TRELLIS_HOST=127.0.0.1 && set TRELLIS_PORT=17317 && set TRELLIS_ALLOW_NO_AUTH=true && $(PYTHON_VENV) server.py
 else
-	TRELLIS_TRANSPORT=http TRELLIS_HOST=0.0.0.0 TRELLIS_PORT=17317 TRELLIS_ALLOW_NO_AUTH=true $(PYTHON_VENV) server.py
+	TRELLIS_TRANSPORT=http TRELLIS_HOST=127.0.0.1 TRELLIS_PORT=17317 TRELLIS_ALLOW_NO_AUTH=true $(PYTHON_VENV) server.py
 endif
 
 check:

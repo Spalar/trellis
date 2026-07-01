@@ -2,20 +2,29 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Optional
 
 from datetime import datetime, timezone
 
+from src.trellis.utils import get_trellis_data_dir
+
+
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 class ProjectSpec:
     """Represents a project specification from project.md."""
 
-    def __init__(self, project_id: str, content: str = "", source_path: str = "") -> None:
+    def __init__(
+        self, project_id: str, content: str = "", source_path: str = ""
+    ) -> None:
         self.project_id = project_id
         self.content = content
         self.source_path = source_path
@@ -85,7 +94,7 @@ class SpecManager:
 
     def __init__(self, base_dir: str = None) -> None:
         if base_dir is None:
-            base_dir = os.environ.get("TRELLIS_DATA_DIR", ".trellis/data")
+            base_dir = str(get_trellis_data_dir())
         self.base_dir = Path(base_dir)
 
     def _safe_name(self, name: str) -> str:
@@ -170,7 +179,9 @@ Description of feature.
 """
         return template
 
-    def enrich_with_code(self, project_id: str, spec: ProjectSpec, code_summary: str) -> str:
+    def enrich_with_code(
+        self, project_id: str, spec: ProjectSpec, code_summary: str
+    ) -> str:
         """Suggest updates to project.md based on code analysis."""
         # For now, return the existing spec
         return spec.content

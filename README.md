@@ -2,6 +2,29 @@
 
 Trellis is a dual-knowledge system that combines **code graph analysis** with **linkable documentation** to help you understand, plan, and verify changes to your codebase.
 
+## Quick Start (Download & Run)
+
+No Python, no terminal commands, no setup required.
+
+1. **Download** the latest release for your platform from GitHub Releases:
+   - `trellis-v0.2.0-windows-x86_64.zip`
+   - `trellis-v0.2.0-macos-arm64.zip`
+   - `trellis-v0.2.0-linux-x86_64.zip`
+
+2. **Extract** the archive
+
+3. **Run the launcher:**
+   - Windows: double-click `start-trellis.bat`
+   - macOS/Linux: double-click or run `./start-trellis.sh`
+
+4. **Done** — your browser opens to `http://localhost:17317`
+
+The server starts on `http://localhost:17317` with:
+- `/` — Web visualizer
+- `/mcp` — MCP protocol over HTTP (for AI agents)
+
+---
+
 ## What It Does
 
 - **Code Graph**: Auto-indexes your codebase (functions, classes, calls, imports)
@@ -10,27 +33,27 @@ Trellis is a dual-knowledge system that combines **code graph analysis** with **
 - **MCP Integration**: 16 tools for AI coding agents (Claude, Copilot, etc.)
 - **Web UI**: Interactive graph visualizer at `http://localhost:17317`
 
-## Prerequisites
+## Building from Source
+
+If you prefer to build from source or contribute:
+
+### Prerequisites
 
 - **Python 3.10+**
 - **Git** (for diff analysis)
 - **Rust toolchain** (only if building `code-graph-mcp` from source)
 
-## Installation
-
-### 1. Clone & Setup
+### Install
 
 ```bash
 git clone <repo-url>
 cd trellis
-
-# Create virtual environment and install dependencies
 make install
 ```
 
 This creates `.venv/` and installs all Python dependencies including Trellis itself in editable mode.
 
-### 2. Build code-graph-mcp Binary
+### Build code-graph-mcp Binary
 
 Trellis requires the `code-graph-mcp` Rust binary for indexing code:
 
@@ -44,23 +67,25 @@ python scripts/build_bridge.py
 
 Verify it's found:
 ```bash
-# Should show the binary path
 python -c "from src.trellis.bridge import CodeGraphBridge; print('OK')"
 ```
 
-## Running the Server
+## Running the Server (Development)
 
-Trellis supports two modes:
+Trellis supports two transports. Both use **JSON-RPC** for MCP protocol messages:
 
-### Mode 1: MCP Stdio (for AI Agents) - Recommended
+| Transport | Use Case | Command |
+|-----------|----------|---------|
+| **stdio** | AI agents / MCP clients | `make dev` |
+| **HTTP** | Web UI + MCP over HTTP | `make run-http` |
 
-For Claude Desktop, VS Code Copilot, or any MCP client:
+### Mode 1: MCP Stdio (for AI Agents)
 
 ```bash
 make dev
 ```
 
-This starts the MCP server over stdio. To configure your MCP client:
+This starts the MCP server over stdio using JSON-RPC messages. To configure your MCP client:
 
 **VS Code / Copilot Chat:**
 ```bash
@@ -86,15 +111,17 @@ This prints the exact JSON config to add to your VS Code MCP settings.
 }
 ```
 
-### Mode 2: HTTP Server (for Web UI)
-
-For the visualizer and direct API access:
+### Mode 2: HTTP Server (for Web UI + MCP over HTTP)
 
 ```bash
 make run-http
 ```
 
-Server starts on `http://localhost:17317`
+Server starts on `http://localhost:17317` with:
+- `/` — Web visualizer
+- `/health` — Health check
+- `/graph/{project_id}` — REST API endpoints
+- `/mcp` — MCP protocol over HTTP (JSON-RPC via streamable HTTP/SSE)
 
 **Open visualizer:**
 ```bash
@@ -103,7 +130,25 @@ open http://localhost:17317
 make check
 ```
 
-## Quick Start
+**Connect an MCP client over HTTP:**
+Point your MCP client at `http://localhost:17317/mcp` using the streamable HTTP transport.
+
+## Building a Release
+
+To create a downloadable zip for distribution:
+
+```bash
+python scripts/build_release.py
+```
+
+Output:
+```
+dist/trellis-v0.2.0-windows-x86_64.zip
+```
+
+This bundles Python, all dependencies, the `code-graph-mcp` binary, visualizer HTML, docs, and a launcher script. Users just extract and run.
+
+## Quick Start (After Server is Running)
 
 ### 1. Sync a Project
 
@@ -176,9 +221,12 @@ trellis/
 │   ├── impact_analyzer.py   # Impact analysis
 │   └── python_call_indexer.py  # Python call graph
 ├── scripts/                 # Build & utility scripts
+│   ├── build_bridge.py      # Build code-graph-mcp binary
+│   └── build_release.py     # Build release archive
 ├── bin/                     # code-graph-mcp binary (created by build)
 ├── visualizer.html          # Web UI
 ├── server.py                # MCP + HTTP server
+├── trellis.spec             # PyInstaller build spec
 └── Makefile                 # Common commands
 ```
 
@@ -187,6 +235,8 @@ trellis/
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TRELLIS_TRANSPORT` | `stdio` | Server mode: `stdio` or `http` |
+| `TRELLIS_HOST` | `127.0.0.1` | HTTP server host |
+| `TRELLIS_PORT` | `17317` | HTTP server port |
 | `TRELLIS_ALLOW_NO_AUTH` | `false` | Disable auth (local dev only) |
 | `TRELLIS_DATA_DIR` | `~/.trellis` | Where project indexes are stored |
 | `FASTMCP_LOG_LEVEL` | `ERROR` | MCP server log level |
@@ -200,8 +250,6 @@ python scripts/build_bridge.py
 
 **"GitPython not installed"**
 ```bash
-pip install GitPython
-# Or if using venv:
 .venv\Scripts\pip install GitPython  # Windows
 .venv/bin/pip install GitPython      # macOS/Linux
 ```
