@@ -1,6 +1,6 @@
 ---
 name: "trellis-mcp"
-description: "Graph-based code analysis and knowledge management using Trellis MCP tools. Use when the user wants to: (1) analyze or understand a codebase structure, (2) assess impact of proposed changes, (3) trace dependencies between features or functions, (4) plan implementations with full context, (5) create or query linkable documentation, (6) verify changes after implementation. Triggers: 'analyze this codebase', 'what's the impact of changing X', 'help me understand this project', 'before I make changes', 'trace dependencies', 'impact analysis', 'feature graph', 'understand the architecture', 'how does X relate to Y', 'plan this refactor', 'create a note about', 'find documentation about'.
+description: "Graph-based code analysis and knowledge management using Trellis MCP tools. Use when the user wants to: (1) analyze or understand a codebase structure, (2) assess impact of proposed changes, (3) trace dependencies between features or functions, (4) plan implementations with full context, (5) create or query linkable documentation, (6) verify changes after implementation. Triggers: analyze this codebase, what's the impact of changing X, help me understand this project, before I make changes, trace dependencies, impact analysis, feature graph, understand the architecture, how does X relate to Y, plan this refactor, create a note about, find documentation about."
 ---
 
 # Trellis MCP Skill
@@ -26,6 +26,32 @@ Use Trellis tools to analyze codebases and manage linkable documentation. Trelli
 - Working in a single file with no external calls
 - The codebase is already fully mapped in your context
 
+## Project.md (Feature Specification)
+
+Trellis reads `project.md` in your repo root to understand feature boundaries. If it is missing, the code graph still works but feature-level analysis is weaker.
+
+A minimal `project.md` has a section per feature:
+
+```markdown
+# Project Name
+
+## Feature: Icons
+
+- **Description**: Renders and manages toolbar icons.
+- **Decisions**: SVG icons are preferred over font icons for accessibility.
+- **Files**: `src/js/component/icon.js`, `src/js/component/iconRegistry.js`
+- **Dependencies**: Graphics, Toolbar
+
+## Feature: Graphics
+
+- **Description**: Low-level canvas rendering helpers.
+- **Decisions**: All canvas ops go through `graphics.js`.
+- **Files**: `src/js/graphics.js`
+- **Dependencies**: None
+```
+
+Keep sections short and machine-readable. Use the exact feature names you want to query with `trellis_feature_info` and `trellis_trace_path`.
+
 ## Core Principles
 
 ### 1. Discovery First
@@ -48,9 +74,14 @@ Always run impact analysis before modifying code. Trellis shows you:
 
 Create knowledge notes for key features, decisions, and divergence tracking. Notes support:
 - Wiki links: `[[Other Note]]` for connecting ideas
-- Code mentions: `@function_name` for referencing code
+- Code mentions: `@function_name` for referencing functions, methods, classes, or files in the code graph
 - Bidirectional backlinks (auto-computed)
 - YAML frontmatter tags
+
+**How linking works:**
+- `[[Note Title]]` resolves to an existing note by its ID, title, or slug. Trellis strips common prefixes like `Feature:`, `Decision:`, and `Note:`, so `[[Feature: Code Graph Bridge]]` and `[[Code Graph Bridge]]` can resolve to the same note.
+- `@function_name` links to a code symbol. Trellis filters out prose placeholders (e.g., `@Function` in generic text) and only creates an edge when the symbol exists in the synced code graph. File names such as `@auth.py` also work.
+- The combined graph returned by `trellis_knowledge_graph` contains note nodes, code nodes, and edges, so you can see which docs mention which code and vice versa.
 
 **How**: Use `trellis_create_note` to capture knowledge.
 
@@ -207,11 +238,13 @@ Re-sync and re-analyze after implementing changes to catch unintended side effec
 | `trellis_detect_hotspots` | `project_id`, `limit` | High-centrality functions | Find complex areas |
 | `trellis_get_graph` | `project_id` | Raw graph data | Visualization or analysis |
 
+**Avoid `trellis_get_graph` unless you have a specific reason.** It returns the entire code graph as raw JSON, which can be very large. For impact questions, prefer `trellis_analyze_impact`. For dependency questions, prefer `trellis_trace_path`. Use `trellis_get_graph` only when you need to visualize or run custom graph analysis outside Trellis.
+
 ### Doc Graph Tools (5 tools)
 
 | Tool | Parameters | Returns | When to Use |
 |------|-----------|---------|-------------|
-| `trellis_create_note` | `project_id`, `note_id`, `title`, `content`, `tags` | Note ID, title, links, mentions | Create/update knowledge |
+| `trellis_create_note` | `project_id`, `note_id`, `title`, `content`, `tags` | Note ID, title, links, mentions | Create or **update** a knowledge note by `note_id` |
 | `trellis_get_note` | `project_id`, `note_id` | Full note with backlinks | Read note content |
 | `trellis_search_notes` | `project_id`, `query` | Matching notes with excerpts | Find notes by keyword |
 | `trellis_delete_note` | `project_id`, `note_id` | Status message | Remove obsolete notes |
@@ -363,12 +396,83 @@ Looking for documentation?
 4. Reference code with `@function_name`
 5. Add divergence section if implementation differs
 
+## Linking Notes to Code and Blast Radius
+
+Trellis turns notes into first-class graph nodes. Use them to extend impact analysis beyond code edges.
+
+### What can be linked
+
+- **Notes to notes**: `[[Note Title]]` resolves by note ID, title, or slug. Aliases like `Feature:`, `Decision:`, `Note:`, and `Func:` are stripped automatically, so you can use readable titles and still link to a short note ID.
+- **Notes to code**: `@function_name`, `@ClassName.method`, or `@file.py` creates an edge from the note to the matching symbol in the synced code graph. The symbol must exist in the code graph; otherwise it is recorded as unresolved.
+- **Code to notes**: Auto-generated code notes (tagged `is_code_note`) link back to their function.
+- **Feature notes**: Tag a note with `feature` to mark it as a feature node; tag with `decision` to mark it as a decision node.
+
+### What cannot be linked directly
+
+There is no syntax for linking to an arbitrary "graph section" or subgraph. You cannot write `[[@module_name]]` or `[[graph:subgraph]]`. Use a feature note or module note as the anchor instead, and mention the relevant functions inside it.
+
+### Blast-radius use case
+
+When `trellis_analyze_impact` reports that a function is high-risk, use `trellis_get_note` and `trellis_search_notes` to find notes that mention the function or the feature it belongs to. This surfaces:
+- Design decisions that constrain the change
+- Previous refactor notes that explain why the code is shaped this way
+- Cross-feature dependencies documented in notes but not yet visible in the code graph
+- Tests, runbooks, or ownership info tied to the symbol
+
+Workflow:
+1. Run `trellis_analyze_impact` on the function.
+2. Run `trellis_search_notes` with the function or feature name.
+3. Read any related notes; update them if the change affects their content.
+4. Create a new note documenting the decision if the blast radius spans multiple features.
+
+### Example note
+
+```markdown
+---
+title: Icons Rendering Decision
+tags: decision, icons, graphics
+---
+
+# Icons Rendering Decision
+
+We moved icon rendering from canvas to SVG in @icon.js.
+
+## Impact
+- Feature: [[Icons]] depends on [[Graphics]] for @graphics.js helpers.
+- @IconRegistry.loadIcons must be called before any icon is rendered.
+- See [[Auth Refactor Decision]] for the same pattern in authentication.
+```
+
 ## Reference Files
 
 - **`references/impact-analysis.md`**: Detailed workflow for conducting impact analysis and interpreting results
 - **`references/ubiquitous-language-template.md`**: Template for creating a `project.md` file that captures domain terminology and architectural decisions
 
 Read the relevant reference file before Phase 2 (Strategy) of the workflow.
+
+## Troubleshooting & Configuration Notes
+
+### Sync returns 0 nodes or 0 files
+- Check that `repo_path` exists and is the repo root (not a subfolder).
+- Verify the Trellis MCP server is running and listed in your agent's MCP config.
+- Run `trellis_sync` without `incremental` to force a full rebuild.
+- Ensure the repo contains parseable source files (not just binary assets).
+
+### MCP server is not running
+- If tool calls fail immediately with a connection error, the `trellis-core` MCP server process is not running or is not reachable on the configured port.
+- Restart your agent/IDE; the server should start automatically if configured in `opencode.jsonc` or equivalent MCP settings.
+
+### Edges seem stale or callers are missing
+- The code graph can be wiped by background indexing. Re-run `trellis_sync` after any unexpected results.
+- Re-run `trellis_analyze_impact` after re-syncing to refresh affected-function counts.
+
+### Project ID naming
+- `project_id` is arbitrary but must be consistent across calls for the same repo.
+- Trellis stores the index under `TRELLIS_DATA_DIR/projects/{project_id}/`. Use a short, stable identifier such as `tui-image-editor` or `my-service`.
+
+### Windows paths
+- On Windows, pass paths as forward slashes or double-quoted backslashes: `K:\repos\trellis` or `K:/repos/trellis`.
+- Always quote backslash paths in JSON/MCP config to avoid escape-sequence issues.
 
 ## Best Practices
 
