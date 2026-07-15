@@ -32,7 +32,7 @@ Use Trellis tools to analyze codebases and manage linkable documentation. Trelli
 
 Before writing or modifying code, use Trellis to build mental models of the codebase. Sync the repository, list features, and inspect function details. Never write code in a vacuum.
 
-**How**: Run `trellis_sync` + `trellis_list_features` at the start of every session.
+**How**: Run `trellis_sync` + `trellis_list_modules` at the start of every session.
 
 ### 2. Analyze Before Changing
 
@@ -75,17 +75,17 @@ Re-sync and re-analyze after implementing changes to catch unintended side effec
 
 2. **List features/modules**:
    ```
-   trellis_list_features(project_id="my-project")
+   trellis_list_modules(project_id="my-project")
    ```
-   *When: After sync, to see high-level structure*
+   *When: After sync, to see high-level directory structure*
    *Returns: List of modules with symbol counts*
 
 3. **Search for specifics**:
    ```
-   trellis_search(project_id="my-project", query="authenticate", limit=10)
+   trellis_search_code(project_id="my-project", query="authenticate", limit=10)
    ```
-   *When: Looking for specific functions or features*
-   *Returns: Matching functions with file paths and scores*
+   *When: Looking for specific functions, classes, or features*
+   *Returns: Matching symbols with file paths*
 
 4. **Inspect key functions**:
    ```
@@ -197,17 +197,17 @@ Re-sync and re-analyze after implementing changes to catch unintended side effec
 | Tool | Parameters | Returns | When to Use |
 |------|-----------|---------|-------------|
 | `trellis_sync` | `project_id`, `repo_path`, `config_path`, `incremental` | Status, node count, file count | Start of session, after changes |
-| `trellis_list_features` | `project_id` | List of modules with symbol counts | Understand structure |
-| `trellis_search` | `project_id`, `query`, `limit` | Matching functions with paths | Find functions by concept |
-| `trellis_get_function` | `project_id`, `function_path` | Function details (signature, file, line) | Inspect before modifying |
-| `trellis_get_feature` | `project_id`, `feature_name` | Module overview with symbols | Understand a module |
+| `trellis_list_modules` | `project_id` | List of directories with symbol counts | Understand structure |
+| `trellis_search_code` | `project_id`, `query`, `limit` | Matching functions/classes with paths | Find code by keyword |
+| `trellis_get_function` | `project_id`, `function_path` | Function details (signature, file, line, source) | Inspect before modifying |
+| `trellis_module_overview` | `project_id`, `module_path` | Module overview with symbols | Understand a code directory |
 | `trellis_analyze_impact` | `project_id`, `function_path`, `depth_mode` | Risk level, affected counts, features | Before every change |
-| `trellis_trace_path` | `project_id`, `from_feature`, `to_feature` | Dependency path between features | Trace dependencies |
-| `trellis_detect_hotspots` | `project_id` | High-centrality functions | Find complex areas |
-| `trellis_visualize_graph` | `project_id` | Graph data for UI | Visualization |
-| `trellis_analyze_diff` | `project_id`, `diff`, `compare_branch` | Changed files, affected functions, impact report, risk level | PR reviews, pre-commit checks |
+| `trellis_feature_info` | `project_id`, `feature_name` | Feature spec, functions, hot functions | Understand a project.md feature |
+| `trellis_trace_path` | `project_id`, `from_feature`, `to_feature` | Dependency paths between features/modules | Trace dependencies |
+| `trellis_detect_hotspots` | `project_id`, `limit` | High-centrality functions | Find complex areas |
+| `trellis_get_graph` | `project_id` | Raw graph data | Visualization or analysis |
 
-### Doc Graph Tools (6 tools)
+### Doc Graph Tools (5 tools)
 
 | Tool | Parameters | Returns | When to Use |
 |------|-----------|---------|-------------|
@@ -216,19 +216,55 @@ Re-sync and re-analyze after implementing changes to catch unintended side effec
 | `trellis_search_notes` | `project_id`, `query` | Matching notes with excerpts | Find notes by keyword |
 | `trellis_delete_note` | `project_id`, `note_id` | Status message | Remove obsolete notes |
 | `trellis_knowledge_graph` | `project_id` | Full graph with notes + code nodes | Get overview |
+
+### Analysis Tools (2 tools)
+
+| Tool | Parameters | Returns | When to Use |
+|------|-----------|---------|-------------|
 | `trellis_get_boundary_map` | `project_id` | Module boundary map | Identify boundaries |
+| `trellis_analyze_diff` | `project_id`, `diff`, `compare_branch` | Changed files, affected functions, impact report, risk level | PR reviews, pre-commit checks |
 
 ### Tool Parameter Details
 
-**trellis_sync**:
-- `project_id`: Project identifier (used for all subsequent calls)
-- `repo_path`: Path to repository (optional, defaults to project_id)
-- `config_path`: Config file path (default: ".trellis/config.yaml")
-- `incremental`: Only index changed files (default: false)
+**trellis_list_modules**:
+- `project_id`: Project identifier
+- Returns: Directory modules with file and symbol counts
+
+**trellis_search_code**:
+- `project_id`: Project identifier
+- `query`: Keyword to search for in code symbols
+- `limit`: Max results (default: 10)
+
+**trellis_module_overview**:
+- `project_id`: Project identifier
+- `module_path`: Directory path or module name
+- Returns: Symbols and files in that module
+
+**trellis_feature_info**:
+- `project_id`: Project identifier
+- `feature_name`: Feature name from project.md (e.g. "Icons", "Authentication")
+- Returns: Spec, decisions, constraints, functions, hot functions, related notes
+
+**trellis_get_function**:
+- `function_path`: Function name, qualified name, or file:function format
 
 **trellis_analyze_impact**:
 - `function_path`: Function name or qualified name (e.g., "authenticate_user" or "auth.authenticate_user")
 - `depth_mode`: "standard" or "deep" for analysis depth
+
+**trellis_get_graph**:
+- `project_id`: Project identifier
+- Returns: Raw code graph nodes and edges (for visualization or custom analysis)
+
+**trellis_trace_path**:
+- `from_feature`: Source feature or module (can be project.md feature name)
+- `to_feature`: Target feature or module
+- Returns: Direct and indirect call/import edges
+
+**trellis_detect_hotspots**:
+- `project_id`: Project identifier
+- `limit`: Number of hotspots to return (default: 20)
+- Returns: Functions with the most incoming calls/imports
 
 **trellis_analyze_diff**:
 - `diff`: Optional raw diff string. If not provided, automatically fetches from git working tree
@@ -245,8 +281,7 @@ Re-sync and re-analyze after implementing changes to catch unintended side effec
 
 ```
 Starting a new task?
-  → Phase 1: Discovery
-    → Run: trellis_sync + trellis_list_features
+  → Run: trellis_sync + trellis_list_modules
 
 About to change code?
   → Phase 2: Strategy
@@ -314,10 +349,11 @@ Looking for documentation?
 ### Pattern: Onboarding to New Codebase
 
 1. `trellis_sync` - Index the repo
-2. `trellis_list_features` - See high-level structure
-3. `trellis_search` - Find entry points
+2. `trellis_list_modules` - See high-level directory structure
+3. `trellis_search_code` - Find entry points
 4. `trellis_get_function` - Understand key functions
-5. `trellis_create_note` - Document learnings
+5. `trellis_feature_info` - Understand project.md features
+6. `trellis_create_note` - Document learnings
 
 ### Pattern: Documenting Architecture Decisions
 

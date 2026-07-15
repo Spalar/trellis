@@ -156,13 +156,15 @@ Handles user authentication and session management.
 | Tool | When to Use |
 |------|-------------|
 | `trellis_sync` | At start of session, after code changes |
-| `trellis_list_features` | Understand project structure |
-| `trellis_search` | Find functions or features by keyword |
-| `trellis_get_function` | Inspect a function's callers and callees |
+| `trellis_list_modules` | Understand project directory structure |
+| `trellis_search_code` | Find functions or classes by keyword |
+| `trellis_get_function` | Inspect a function's signature and source |
+| `trellis_module_overview` | Understand a code directory/module |
 | `trellis_analyze_impact` | Before changing a function |
-| `trellis_trace_path` | Understand how two features interact |
+| `trellis_feature_info` | Get project.md feature spec + related functions |
+| `trellis_trace_path` | Understand how two features or modules interact |
 | `trellis_detect_hotspots` | Find high-centrality functions |
-
+| `trellis_get_graph` | Get raw code graph data |
 ### Doc Graph Tools
 | Tool | When to Use |
 |------|-------------|
@@ -239,23 +241,19 @@ Response includes:
 
 ```
 project/
-├── .trellis/
-│   ├── notes/           # Doc Graph (markdown files)
-│   └── data/            # Analytics
 ├── .code-graph/         # Symlink to trellis data directory
 │   └── index.db         # Code Graph (SQLite)
-└── project.md           # Feature specifications
+├── project.md           # Feature specifications
+└── .gitignore           # .code-graph is ignored
 
 # Trellis data directory (~/.trellis/)
 .trellis/
 ├── projects/
 │   ├── {project-id}/
 │   │   ├── .code-graph/     # Code Graph (SQLite)
-│   │   └── notes/           # Doc Graph (markdown files)
+│   │   └── .trellis/notes/  # Doc Graph (markdown files)
 │   └── ...
-└── analytics.db
 ```
-
 **Note**: By default, `.code-graph` data is stored in the trellis data directory (`~/.trellis/projects/{project-id}/`) to avoid polluting your project directories. A symlink or junction is created in your project directory so code-graph-mcp can find it. If symlink creation fails (e.g., on Windows without permissions), data stays in the project directory as a fallback.
 
 **Git**: `.code-graph` is automatically added to `.gitignore` and should never be committed. It's generated data that is re-created by running `trellis_sync`.

@@ -10,19 +10,18 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any, Dict, List
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
 
-import time
-from typing import TYPE_CHECKING, Dict
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.trellis import CodeGraphBridge
 
-from analytics import AnalyticsStore
 from spec_manager import SpecManager
 
 # Load environment variables from .env file in development only.
@@ -49,7 +48,6 @@ mcp = FastMCP(
 # State (initialized once at import time)
 # ------------------------------------------------------------------
 _spec_manager = SpecManager()
-_analytics = AnalyticsStore()
 
 # Cache bridge instances by project path
 _bridge_cache: Dict[str, "CodeGraphBridge"] = {}
@@ -127,47 +125,12 @@ def _get_bridge(project_id: str) -> "CodeGraphBridge":
     return _bridge_cache[project_id]
 
 
-def _track_tool(tool_name: str):
-    """Decorator to track tool calls with timing."""
-
-    def decorator(func):
-        import functools
-
-        @functools.wraps(func)
-        async def wrapper(project_id: str = "", **kwargs):
-            start = time.perf_counter()
-            status = "success"
-            error_msg = None
-
-            try:
-                result = await func(project_id=project_id, **kwargs)
-                return result
-            except Exception as e:
-                status = "error"
-                error_msg = str(e)
-                raise
-            finally:
-                duration_ms = (time.perf_counter() - start) * 1000
-                _analytics.record_tool_call(
-                    tool_name=tool_name,
-                    duration_ms=duration_ms,
-                    status=status,
-                    project_id=project_id,
-                    error_message=error_msg,
-                )
-
-        return wrapper
-
-    return decorator
-
-
 # ------------------------------------------------------------------
 # MCP Tools
 # ------------------------------------------------------------------
 
 
 @mcp.tool()
-@_track_tool("trellis_sync")
 async def trellis_sync(
     project_id: str = "",
     repo_path: str = "",
@@ -218,22 +181,98 @@ async def trellis_sync(
 
 
 @mcp.tool()
-@_track_tool("trellis_get_feature")
-async def trellis_get_feature(
+async def trellis_module_overview(
     project_id: str = "",
-    feature_name: str = "",
+    module_path: str = "",
 ) -> str:
-    """Get feature context and functions."""
+    """Get a code module overview (symbols, files, dependencies).
+
+    Use this for inspecting a directory or module in the codebase.
+    For feature-level documentation and decisions, use trellis_feature_info.
+
+    Example:
+      trellis_module_overview(project_id='tui.image-editor', module_path='apps/image-editor/src/js/component')
+    """
     try:
         bridge = _get_bridge(project_id)
-        module = bridge.module_overview(feature_name)
-        return json.dumps(module, indent=2)
+
+        import sqlite3
+        from src.trellis.utils import resolve_code_graph_db
+
+        db_path = resolve_code_graph_db(bridge.project_path)
+        if not db_path.exists():
+            return json.dumps(
+                {"error": "No code-graph database found. Run trellis_sync first."},
+                indent=2,
+            )
+
+        like_pattern = f"%{module_path}%"
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+
+        # Files in this module and their symbols
+        cursor.execute(
+            """
+            SELECT f.path, n.type, n.name, n.qualified_name, n.start_line
+            FROM nodes n
+            JOIN files f ON n.file_id = f.id
+            WHERE f.path LIKE ?
+              AND n.type IN ('function', 'method', 'class')
+            ORDER BY f.path, n.start_line
+        """,
+            (like_pattern,),
+        )
+
+        files: Dict[str, List[Dict[str, Any]]] = {}
+        for row in cursor.fetchall():
+            file_path, kind, name, qname, line = row
+            files.setdefault(file_path, []).append(
+                {
+                    "kind": kind,
+                    "name": name,
+                    "qualified_name": qname or name,
+                    "line": line,
+                }
+            )
+
+        # Edges from this module to other modules
+        cursor.execute(
+            """
+            SELECT DISTINCT tf.path, e.relation, COUNT(*) as cnt
+            FROM edges e
+            JOIN nodes s ON e.source_id = s.id
+            JOIN nodes t ON e.target_id = t.id
+            JOIN files sf ON s.file_id = sf.id
+            JOIN files tf ON t.file_id = tf.id
+            WHERE sf.path LIKE ?
+              AND tf.path NOT LIKE ?
+              AND e.relation IN ('calls', 'imports')
+            GROUP BY tf.path, e.relation
+            ORDER BY cnt DESC
+            LIMIT 30
+        """,
+            (like_pattern, like_pattern),
+        )
+        outgoing = [
+            {"file_path": r[0], "relation": r[1], "count": r[2]}
+            for r in cursor.fetchall()
+        ]
+
+        conn.close()
+
+        return json.dumps(
+            {
+                "module_path": module_path,
+                "files": files,
+                "outgoing_edges": outgoing,
+            },
+            indent=2,
+        )
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
 
 
 @mcp.tool()
-@_track_tool("trellis_analyze_impact")
 async def trellis_analyze_impact(
     project_id: str = "",
     function_path: str = "",
@@ -276,7 +315,6 @@ async def trellis_analyze_impact(
 
 
 @mcp.tool()
-@_track_tool("trellis_get_function")
 async def trellis_get_function(
     project_id: str = "",
     function_path: str = "",
@@ -349,13 +387,18 @@ async def trellis_get_function(
 
 
 @mcp.tool()
-@_track_tool("trellis_search")
-async def trellis_search(
+async def trellis_search_code(
     project_id: str = "",
     query: str = "",
     limit: int = 10,
 ) -> str:
-    """Search for functions by concept."""
+    """Search for code symbols (functions, methods, classes) by keyword.
+
+    For searching knowledge notes, use trellis_search_notes.
+
+    Example:
+      trellis_search_code(project_id='tui.image-editor', query='addIcon', limit=5)
+    """
     try:
         bridge = _get_bridge(project_id)
         results = bridge.search(query, limit=limit)
@@ -365,21 +408,25 @@ async def trellis_search(
 
 
 @mcp.tool()
-@_track_tool("trellis_list_features")
-async def trellis_list_features(
+async def trellis_list_modules(
     project_id: str = "",
 ) -> str:
-    """List all features/modules in the project."""
+    """List all code modules/directories in the project with symbol counts.
+
+    For project.md feature specifications, use trellis_feature_info.
+    """
     try:
         bridge = _get_bridge(project_id)
         pmap = bridge.project_map()
         modules = pmap.get("modules", [])
         return json.dumps(
             {
-                "features": [
+                "modules": [
                     {
-                        "name": m.get("path", "unknown"),
-                        "symbol_count": m.get("symbol_count", 0),
+                        "path": m.get("path", "unknown"),
+                        "files": m.get("files", 0),
+                        "symbols": m.get("symbols", 0),
+                        "language": m.get("language", ""),
                     }
                     for m in modules
                 ]
@@ -391,7 +438,6 @@ async def trellis_list_features(
 
 
 @mcp.tool()
-@_track_tool("trellis_feature_info")
 async def trellis_feature_info(
     project_id: str = "",
     feature_name: str = "",
@@ -401,7 +447,7 @@ async def trellis_feature_info(
     Returns project.md spec, related knowledge notes, all functions in the
     feature, and the most central (hot) functions for blast-radius analysis.
 
-    Example: trellis_feature_info(project_id='tui-image-editor', feature_name='Icons')
+    Example: trellis_feature_info(project_id='tui.image-editor', feature_name='Icons')
     """
     try:
         bridge = _get_bridge(project_id)
@@ -412,20 +458,23 @@ async def trellis_feature_info(
 
 
 @mcp.tool()
-@_track_tool("trellis_trace_path")
 async def trellis_trace_path(
     project_id: str = "",
     from_feature: str = "",
     to_feature: str = "",
 ) -> str:
-    """Trace dependency path between two features/modules.
+    """Trace dependency paths between two features or code modules.
 
-    Features can be module paths like "backend/ai/providers" or "backend/chat".
+    Accepts either project.md feature names (e.g. 'Icons') or code module paths
+    (e.g. 'apps/image-editor/src/js/ui'). Returns direct and one-hop indirect
+    call/import edges between them.
+
+    Example:
+      trellis_trace_path(project_id='tui.image-editor', from_feature='Icons', to_feature='Graphics')
     """
     try:
         bridge = _get_bridge(project_id)
 
-        # Use SQLite to find connections between modules
         import sqlite3
         from src.trellis.utils import resolve_code_graph_db
 
@@ -436,67 +485,113 @@ async def trellis_trace_path(
                 indent=2,
             )
 
+        # Resolve feature names to file patterns via project.md
+        from src.trellis.feature_impact import ProjectContextParser
+
+        context = ProjectContextParser(str(bridge.project_path))
+        from_patterns = [f"%{from_feature}%"]
+        to_patterns = [f"%{to_feature}%"]
+
+        if from_feature in context.features:
+            from_patterns = [
+                p.replace("**", "%").replace("*", "%")
+                for p in context.features[from_feature].file_patterns
+            ]
+        if to_feature in context.features:
+            to_patterns = [
+                p.replace("**", "%").replace("*", "%")
+                for p in context.features[to_feature].file_patterns
+            ]
+
         conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
 
-        # Find files in from_feature module
-        cursor.execute(
-            """
-            SELECT DISTINCT f.path 
-            FROM files f 
-            WHERE f.path LIKE ?
-        """,
-            (f"%{from_feature}%",),
-        )
-        from_files = [row[0] for row in cursor.fetchall()]
+        def _files_for(patterns):
+            files = set()
+            for pat in patterns:
+                cursor.execute(
+                    "SELECT DISTINCT path FROM files WHERE path LIKE ?", (pat,)
+                )
+                files.update(row[0] for row in cursor.fetchall())
+            return files
 
-        # Find files in to_feature module
-        cursor.execute(
-            """
-            SELECT DISTINCT f.path 
-            FROM files f 
-            WHERE f.path LIKE ?
-        """,
-            (f"%{to_feature}%",),
-        )
-        to_files = [row[0] for row in cursor.fetchall()]
+        from_files = _files_for(from_patterns)
+        to_files = _files_for(to_patterns)
 
         if not from_files:
-            return json.dumps({"error": f"Module '{from_feature}' not found"}, indent=2)
+            return json.dumps(
+                {"error": f"Feature/module '{from_feature}' not found"}, indent=2
+            )
         if not to_files:
-            return json.dumps({"error": f"Module '{to_feature}' not found"}, indent=2)
+            return json.dumps(
+                {"error": f"Feature/module '{to_feature}' not found"}, indent=2
+            )
 
-        # Find import/call edges between the modules
+        # Direct edges: source in from_files, target in to_files
+        from_ph = ",".join("?" * len(from_files))
+        to_ph = ",".join("?" * len(to_files))
         cursor.execute(
-            """
-            SELECT DISTINCT 
-                sf.path as from_file,
-                tf.path as to_file,
-                s.name as symbol_name,
-                e.relation
+            f"""
+            SELECT DISTINCT sf.path, tf.path, s.name, e.relation
             FROM edges e
             JOIN nodes s ON e.source_id = s.id
             JOIN nodes t ON e.target_id = t.id
             JOIN files sf ON s.file_id = sf.id
             JOIN files tf ON t.file_id = tf.id
             WHERE e.relation IN ('calls', 'imports')
-              AND sf.path LIKE ?
-              AND tf.path LIKE ?
+              AND sf.path IN ({from_ph})
+              AND tf.path IN ({to_ph})
             LIMIT 20
         """,
-            (f"%{from_feature}%", f"%{to_feature}%"),
+            tuple(from_files) + tuple(to_files),
         )
+        direct = [
+            {"from_file": r[0], "to_file": r[1], "symbol": r[2], "relation": r[3]}
+            for r in cursor.fetchall()
+        ]
 
-        direct_connections = []
-        for row in cursor.fetchall():
-            direct_connections.append(
-                {
-                    "from_file": row[0],
-                    "to_file": row[1],
-                    "symbol": row[2],
-                    "relation": row[3],
-                }
-            )
+        # One-hop indirect: from_files -> intermediate (not in from/to)
+        all_files = from_files | to_files
+        all_ph = ",".join("?" * len(all_files))
+        cursor.execute(
+            f"""
+            SELECT DISTINCT sf.path, tf.path, s.name, e.relation
+            FROM edges e
+            JOIN nodes s ON e.source_id = s.id
+            JOIN nodes t ON e.target_id = t.id
+            JOIN files sf ON s.file_id = sf.id
+            JOIN files tf ON t.file_id = tf.id
+            WHERE e.relation IN ('calls', 'imports')
+              AND sf.path IN ({from_ph})
+              AND tf.path NOT IN ({all_ph})
+            LIMIT 50
+        """,
+            tuple(from_files) + tuple(all_files),
+        )
+        outbound = [
+            {"from_file": r[0], "to_file": r[1], "symbol": r[2], "relation": r[3]}
+            for r in cursor.fetchall()
+        ]
+
+        cursor.execute(
+            f"""
+            SELECT DISTINCT sf.path, tf.path, s.name, e.relation
+            FROM edges e
+            JOIN nodes s ON e.source_id = s.id
+            JOIN nodes t ON e.target_id = t.id
+            JOIN files sf ON s.file_id = sf.id
+            JOIN files tf ON t.file_id = tf.id
+            WHERE e.relation IN ('calls', 'imports')
+              AND sf.path NOT IN ({all_ph})
+              AND tf.path IN ({to_ph})
+            LIMIT 50
+        """,
+            tuple(all_files) + tuple(to_files),
+        )
+        inbound = [
+            {"from_file": r[0], "to_file": r[1], "symbol": r[2], "relation": r[3]}
+            for r in cursor.fetchall()
+        ]
 
         conn.close()
 
@@ -506,10 +601,12 @@ async def trellis_trace_path(
                 "to_feature": to_feature,
                 "from_files_count": len(from_files),
                 "to_files_count": len(to_files),
-                "direct_connections": direct_connections,
-                "connection_count": len(direct_connections),
-                "from_files_sample": from_files[:5],
-                "to_files_sample": to_files[:5],
+                "from_files_sample": sorted(from_files)[:5],
+                "to_files_sample": sorted(to_files)[:5],
+                "direct_connections": direct,
+                "direct_connection_count": len(direct),
+                "outbound_intermediate": outbound[:10],
+                "inbound_intermediate": inbound[:10],
             },
             indent=2,
         )
@@ -518,11 +615,13 @@ async def trellis_trace_path(
 
 
 @mcp.tool()
-@_track_tool("trellis_visualize_graph")
-async def trellis_visualize_graph(
+async def trellis_get_graph(
     project_id: str = "",
 ) -> str:
-    """Get graph data for visualization."""
+    """Get code graph data (nodes, edges, modules) for the project.
+
+    Returns raw graph data suitable for visualization or analysis.
+    """
     try:
         bridge = _get_bridge(project_id)
         graph = bridge.get_graph_for_visualizer(max_nodes=200)
@@ -532,22 +631,65 @@ async def trellis_visualize_graph(
 
 
 @mcp.tool()
-@_track_tool("trellis_detect_hotspots")
 async def trellis_detect_hotspots(
     project_id: str = "",
+    limit: int = 20,
 ) -> str:
-    """Find high-centrality functions (potential hotspots)."""
+    """Find high-centrality functions (potential hotspots).
+
+    Returns functions with the most incoming calls/imports.
+    """
     try:
         bridge = _get_bridge(project_id)
-        pmap = bridge.project_map()
-        hot = pmap.get("hot_functions", [])[:20]
-        return json.dumps({"hotspots": hot}, indent=2)
+
+        import sqlite3
+        from src.trellis.utils import resolve_code_graph_db
+
+        db_path = resolve_code_graph_db(bridge.project_path)
+        if not db_path.exists():
+            return json.dumps(
+                {"error": "No code-graph database found. Run trellis_sync first."},
+                indent=2,
+            )
+
+        hotspots = []
+        try:
+            conn = sqlite3.connect(str(db_path))
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT t.name, t.qualified_name, f.path, t.start_line, COUNT(*) as in_degree
+                FROM edges e
+                JOIN nodes t ON e.target_id = t.id
+                JOIN files f ON t.file_id = f.id
+                WHERE e.relation IN ('calls', 'imports', 'uses')
+                  AND t.type IN ('function', 'method')
+                GROUP BY t.id
+                ORDER BY in_degree DESC
+                LIMIT ?
+            """,
+                (limit,),
+            )
+            hotspots = [
+                {
+                    "name": row[0],
+                    "qualified_name": row[1] or row[0],
+                    "file_path": row[2],
+                    "line": row[3],
+                    "in_degree": row[4],
+                }
+                for row in cursor.fetchall()
+            ]
+            conn.close()
+        except Exception:
+            pass
+
+        return json.dumps({"hotspots": hotspots}, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
 
 
 @mcp.tool()
-@_track_tool("trellis_analyze_diff")
 async def trellis_analyze_diff(
     project_id: str = "",
     diff: str = "",
@@ -809,16 +951,15 @@ async def trellis_analyze_diff(
 
 
 @mcp.tool()
-@_track_tool("trellis_get_boundary_map")
 async def trellis_get_boundary_map(
     project_id: str = "",
 ) -> str:
-    """Get module boundary map."""
+    """Get module boundary map (modules and cross-module dependencies)."""
     try:
         bridge = _get_bridge(project_id)
         pmap = bridge.project_map()
         modules = pmap.get("modules", [])
-        deps = pmap.get("module_dependencies", [])
+        deps = pmap.get("dependencies", [])
         return json.dumps(
             {
                 "modules": [m.get("path") for m in modules],
@@ -836,7 +977,6 @@ async def trellis_get_boundary_map(
 
 
 @mcp.tool()
-@_track_tool("trellis_create_note")
 async def trellis_create_note(
     project_id: str = "",
     note_id: str = "",
@@ -872,7 +1012,6 @@ async def trellis_create_note(
 
 
 @mcp.tool()
-@_track_tool("trellis_get_note")
 async def trellis_get_note(
     project_id: str = "",
     note_id: str = "",
@@ -907,7 +1046,6 @@ async def trellis_get_note(
 
 
 @mcp.tool()
-@_track_tool("trellis_search_notes")
 async def trellis_search_notes(
     project_id: str = "",
     query: str = "",
@@ -942,7 +1080,6 @@ async def trellis_search_notes(
 
 
 @mcp.tool()
-@_track_tool("trellis_delete_note")
 async def trellis_delete_note(
     project_id: str = "",
     note_id: str = "",
@@ -969,7 +1106,6 @@ async def trellis_delete_note(
 
 
 @mcp.tool()
-@_track_tool("trellis_knowledge_graph")
 async def trellis_knowledge_graph(
     project_id: str = "",
 ) -> str:
@@ -1086,15 +1222,6 @@ async def spec_handler(request: Request):
         content = body.get("content", "")
         _spec_manager.save_spec(project_id, content)
         return JSONResponse({"project_id": project_id, "status": "ok"})
-
-
-@mcp.custom_route("/analytics", methods=["GET"])
-async def analytics_dashboard(request: Request):
-    """Serve analytics dashboard."""
-    dashboard_path = Path(__file__).parent / "analytics.html"
-    if dashboard_path.exists():
-        return FileResponse(dashboard_path)
-    return JSONResponse({"error": "Analytics dashboard not found"}, status_code=404)
 
 
 @mcp.custom_route("/knowledge-graph/{project_id}", methods=["GET"])
@@ -1252,18 +1379,19 @@ async def list_projects(request: Request):
 # ------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # When running as a bundled executable, set up the environment and open
-    # the browser automatically. For development via Makefile, environment
-    # variables are already configured.
-    try:
-        from src.trellis.launcher import setup_environment, open_browser
+    # Launcher and browser auto-open are only for bundled (PyInstaller) releases.
+    # In development, or when used as an MCP server by OpenCode/Claude/etc.,
+    # we never want to force HTTP mode or open a browser.
+    if getattr(sys, "frozen", False):
+        try:
+            from src.trellis.launcher import setup_environment, open_browser
 
-        setup_environment()
-        open_browser()
-    except ImportError:
-        pass
+            setup_environment()
+            open_browser()
+        except ImportError:
+            pass
 
-    # Determine transport from environment
+    # Determine transport from environment; default to stdio for MCP servers.
     transport = os.environ.get("TRELLIS_TRANSPORT", "stdio")
 
     if transport == "stdio":

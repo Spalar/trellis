@@ -30,7 +30,7 @@ The server starts on `http://localhost:17317` with:
 - **Code Graph**: Auto-indexes your codebase (functions, classes, calls, imports)
 - **Impact Analysis**: "If I change this function, what breaks?"
 - **Linkable Docs**: Write markdown notes with `[[Wiki Links]]` and `@CodeMentions`
-- **MCP Integration**: 16 tools for AI coding agents (Claude, Copilot, etc.)
+- **MCP Integration**: 17 tools for AI coding agents (Claude, Copilot, etc.)
 - **Web UI**: Interactive graph visualizer at `http://localhost:17317`
 
 ## Building from Source
@@ -266,6 +266,20 @@ code-graph-mcp's incremental indexing may wipe custom call edges. The server aut
 ```bash
 trellis_sync(project_id="my-project")
 ```
+
+## Manual Evaluation
+
+A standalone evaluation utility lives in `eval/` (gitignored, local-only). It runs a proxy + web UI for manually testing token usage, recall speed, and blast radius with the `tui.image-editor` scenarios.
+
+The `tui-image-editor-fixture/` directory inside this repo is a test fixture used only by Trellis tests; it is not the repo the agent should edit during evaluation. The real repo is `K:\repos\tui.image-editor` (or wherever you cloned it).
+
+```bash
+cd eval
+pip install -r requirements.txt
+python run_eval.py
+```
+
+Open `http://127.0.0.1:17417`, select a test case, and follow the on-screen setup instructions to point your coding agent through the proxy. See `eval/README.md` for details.
 
 ## License
 

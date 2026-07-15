@@ -8,6 +8,7 @@
         "C:\\path\\to\\trellis\\server.py"
       ],
       "environment": {
+        "TRELLIS_TRANSPORT": "stdio",
         "TRELLIS_ALLOW_NO_AUTH": "true",
         "FASTMCP_SHOW_SERVER_BANNER": "false",
         "FASTMCP_LOG_LEVEL": "ERROR",

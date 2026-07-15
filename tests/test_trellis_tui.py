@@ -23,7 +23,7 @@ from src.trellis.utils import resolve_code_graph_db
 
 @pytest.fixture(scope="module")
 def project_path():
-    path = Path(__file__).resolve().parents[1] / "tui-image-editor"
+    path = Path(__file__).resolve().parents[1] / "tui-image-editor-fixture"
     if not path.exists():
         pytest.skip("TUI image-editor fixture not present")
     return path

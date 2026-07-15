@@ -1,7 +1,9 @@
 .trellis
 
 # External project clones used for Trellis analysis
+# The old "tui-image-editor" name is kept here temporarily until you can delete it.
 tui-image-editor/
+tui-image-editor-fixture/
 
 # Compiled binaries (auto-built from submodule)
 bin/*
@@ -122,5 +124,7 @@ Thumbs.db
 #poetry.lock
 #uv.lock
 
-# Trellis generated data (symlinks to ~/.trellis/)
-.code-graph
+# Evaluation harness output
+# Entire eval folder is local-only utility; do not commit
+eval/
+.code-graph/

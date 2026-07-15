@@ -98,14 +98,13 @@ Clean web UI for exploring code and doc graphs.
 
 ### Files
 - visualizer.html
-- analytics.html
 
 ### Dependencies
 - Feature: MCP Server
 
-## Feature: Security & Analytics
+## Feature: Security
 
-Security scanning and usage analytics.
+Security scanning and local-only operation.
 
 ### Decisions
 - SEC-001: Optional auth for air-gapped use (because: development environments)
@@ -114,7 +113,6 @@ Security scanning and usage analytics.
 ### Files
 - scripts/security_scan.py
 - auth.py
-- analytics.py
 
 ### Constraints
 - Must not log secrets or keys

@@ -47,8 +47,8 @@ Use this template to create a `project.md` file in the repository root. Update i
 
 1. **After Discovery (Phase 1)**
    - Fill Project Info with repository details
-   - List features from `trellis_list_features` output
-   - Map each feature to its key files using `trellis_get_feature`
+   - List features from `trellis_feature_info` or `trellis_list_modules` output
+   - Map each feature to its key files using `trellis_module_overview` or `trellis_feature_info`
 
 2. **During Strategy (Phase 2)**
    - Add domain terms as you encounter them in code
