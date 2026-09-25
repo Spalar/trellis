@@ -31,7 +31,9 @@ def update_vulnerable_dependencies(source_dir: Path) -> None:
     """
     vulnerable_crates = [
         "quinn-proto",
+        "rustls",
         "rustls-webpki",
+        "crossbeam-epoch",
         "tar",
         "paste",
         "anyhow",

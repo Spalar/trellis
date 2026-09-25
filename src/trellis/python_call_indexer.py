@@ -8,6 +8,7 @@ work correctly for Python codebases.
 """
 
 import ast
+import json
 import sqlite3
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -98,7 +99,7 @@ class PythonCallGraphIndexer:
                                 (
                                     node_id,
                                     target_id,
-                                    f'{{"caller": "{qualified_name}"}}',
+                                    json.dumps({"caller": qualified_name}),
                                 ),
                             )
                             edges_added += 1

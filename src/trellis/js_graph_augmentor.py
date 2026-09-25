@@ -162,15 +162,29 @@ class JSGraphAugmentor:
     def _insert_edge(
         self, conn: sqlite3.Connection, source_id: int, target_id: int, relation: str
     ) -> bool:
+        """Ensure an edge exists; True when present afterwards.
+
+        The code-graph indexer (>=0.156.0) extracts some dynamic-dispatch
+        calls natively, so the edge may already exist — that still counts.
+        """
         try:
-            conn.execute(
+            cur = conn.execute(
                 """
                 INSERT OR IGNORE INTO edges (source_id, target_id, relation)
                 VALUES (?, ?, ?)
                 """,
                 (source_id, target_id, relation),
             )
-            return conn.total_changes > 0
+            if cur.rowcount > 0:
+                return True
+            row = conn.execute(
+                """
+                SELECT 1 FROM edges
+                WHERE source_id = ? AND target_id = ? AND relation = ?
+                """,
+                (source_id, target_id, relation),
+            ).fetchone()
+            return row is not None
         except sqlite3.IntegrityError:
             return False
 
