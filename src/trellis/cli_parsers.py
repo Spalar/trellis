@@ -52,8 +52,10 @@ def parse_impact(stdout: str) -> Dict[str, Any]:
         "callers": [],
     }
 
+    # Newer servers print "N direct, M callers, K files, R routes (T tests)";
+    # older ones "N direct callers, N total, N files, N routes".
     summary_match = re.search(
-        r"(\d+)\s+direct\s+callers?,\s+(\d+)\s+total,\s+(\d+)\s+files?,\s+(\d+)\s+routes?",
+        r"(\d+)\s+direct(?:\s+callers?)?,\s+(\d+)\s+(?:total|callers),\s+(\d+)\s+files?,\s+(\d+)\s+routes?",
         stdout,
     )
     if summary_match:
@@ -186,8 +188,9 @@ def parse_dead_code(stdout: str) -> List[Dict[str, Any]]:
     """Parse `code-graph-mcp dead-code [path]` output."""
     lines = [line.rstrip() for line in stdout.splitlines() if line.strip()]
     results: List[Dict[str, Any]] = []
+    # Newer servers print "Dead code: N candidates (...)"; older "results".
     header_re = re.compile(
-        r"Dead\s+code:\s+(\d+)\s+results\s+\((\d+)\s+orphan,\s+(\d+)\s+exported-unused\)"
+        r"Dead\s+code:\s+(\d+)\s+(?:results|candidates)\s+\((\d+)\s+orphan,\s+(\d+)\s+exported-unused\)"
     )
     orphan_re = re.compile(r"^\s+(\w+)\s+(.+?)\s+(.+?\.\w+):(\d+)\s+\((\d+)\s+lines\)")
 
@@ -346,3 +349,39 @@ def parse_ast_search(stdout: str) -> List[Dict[str, Any]]:
                 }
             )
     return results
+
+
+def parse_tour(stdout: str) -> Dict[str, Any]:
+    """Parse `code-graph-mcp tour [path] --json` output.
+
+    Output is a JSON envelope: {"reading_order": [{path, role, depended_on_by,
+    depends_on, key_symbols, in_cycle}, ...]}. Falls back to an empty order if
+    the stdout is not JSON (e.g. an error line).
+    """
+    import json
+
+    try:
+        data = json.loads(stdout)
+    except (ValueError, TypeError):
+        return {"reading_order": []}
+    if not isinstance(data, dict):
+        return {"reading_order": []}
+    order = data.get("reading_order")
+    return {"reading_order": order if isinstance(order, list) else []}
+
+
+def parse_json_array(stdout: str) -> List[Dict[str, Any]]:
+    """Parse CLI commands whose --json output is a plain array of objects.
+
+    Used by `centrality`, `cycles`, and `surprising`. Falls back to an empty
+    list if the stdout is not a JSON array (e.g. an error line).
+    """
+    import json
+
+    try:
+        data = json.loads(stdout)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict)]

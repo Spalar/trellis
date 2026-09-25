@@ -40,6 +40,9 @@ class CodeGraphBridge:
         self._proc: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
         self._req_id = 0
+        # The file watcher lives in the server process, so it must be (re)armed
+        # after every spawn. `start_watch` is idempotent upstream.
+        self._watch_started = False
 
         # Setup .code-graph in trellis data directory with symlink in project
         self.code_graph_path = get_code_graph_path(self.project_path)
@@ -124,9 +127,11 @@ class CodeGraphBridge:
                     timeout=10,
                 )
             else:
-                # Try using pkill on Unix
+                # Match the process name exactly (-x), not the full cmdline
+                # (-f), so unrelated processes merely mentioning the string
+                # (editors, shells) are not killed.
                 subprocess.run(
-                    ["pkill", "-9", "-f", "code-graph-mcp"],
+                    ["pkill", "-9", "-x", "code-graph-mcp"],
                     capture_output=True,
                     timeout=10,
                 )
@@ -236,35 +241,52 @@ class CodeGraphBridge:
         self._ensure_running()
 
         with self._lock:
-            self._req_id += 1
-            request = {
-                "jsonrpc": "2.0",
-                "id": self._req_id,
-                "method": "tools/call",
-                "params": {
-                    "name": tool_name,
-                    "arguments": arguments,
-                },
-            }
-
-            # Send request
-            request_line = json.dumps(request) + "\n"
-            self._proc.stdin.write(request_line)
-            self._proc.stdin.flush()
-
-            # Read response with timeout to prevent infinite hangs
-            # Use threading approach (cross-platform, works with pipes on Windows)
-            import threading
-
-            timeout = 30  # Wait up to 30 seconds for response
-            result = {"line": None, "error": None}
-
-            def read_line():
+            # Arm the file watcher once per server process. Never let watcher
+            # setup block real work (e.g. a secondary-mode server refuses it).
+            if not self._watch_started:
                 try:
-                    result["line"] = self._proc.stdout.readline()
-                except Exception as e:
-                    result["error"] = e
+                    self._rpc_locked("start_watch", timeout=30)
+                    self._watch_started = True
+                except Exception:
+                    pass
+            return self._rpc_locked(tool_name, **arguments)
 
+    def _rpc_locked(
+        self, tool_name: str, timeout: int = 120, **arguments
+    ) -> Union[Dict, List, str]:
+        """Send one JSON-RPC tools/call and return its parsed result.
+
+        Caller must hold ``self._lock``. The server interleaves JSON-RPC
+        notifications (progress/message) on stdout, so keep reading until a
+        response matching this request's id arrives; skip everything else.
+        """
+        self._req_id += 1
+        request = {
+            "jsonrpc": "2.0",
+            "id": self._req_id,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments,
+            },
+        }
+
+        # Send request
+        request_line = json.dumps(request) + "\n"
+        self._proc.stdin.write(request_line)
+        self._proc.stdin.flush()
+
+        import threading
+
+        def read_line():
+            try:
+                result["line"] = self._proc.stdout.readline()
+            except Exception as e:
+                result["error"] = e
+
+        response = None
+        while response is None:
+            result = {"line": None, "error": None}
             thread = threading.Thread(target=read_line)
             thread.daemon = True
             thread.start()
@@ -285,29 +307,37 @@ class CodeGraphBridge:
             if not response_line:
                 raise RuntimeError("code-graph-mcp process closed unexpectedly")
 
-            response = json.loads(response_line)
+            try:
+                candidate = json.loads(response_line)
+            except json.JSONDecodeError:
+                continue  # non-JSON noise on stdout: skip
 
-            if "error" in response:
-                error = response["error"]
-                raise RuntimeError(
-                    f"Tool '{tool_name}' failed: {error.get('message', 'Unknown error')}"
-                )
+            if candidate.get("id") != request["id"]:
+                continue  # notification or stale response: skip
 
-            # Parse result
-            result = response.get("result", {})
+            response = candidate
 
-            # Handle text content (MCP content array)
-            if "content" in result:
-                content = result["content"]
-                if content and content[0].get("type") == "text":
-                    text = content[0].get("text", "")
-                    # Try to parse as JSON
-                    try:
-                        return json.loads(text)
-                    except json.JSONDecodeError:
-                        return text
+        if "error" in response:
+            error = response["error"]
+            raise RuntimeError(
+                f"Tool '{tool_name}' failed: {error.get('message', 'Unknown error')}"
+            )
 
-            return result
+        # Parse result
+        result = response.get("result", {})
+
+        # Handle text content (MCP content array)
+        if "content" in result:
+            content = result["content"]
+            if content and content[0].get("type") == "text":
+                text = content[0].get("text", "")
+                # Try to parse as JSON
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError:
+                    return text
+
+        return result
 
     def close(self) -> None:
         """Clean up subprocess and release file locks."""
@@ -322,14 +352,14 @@ class CodeGraphBridge:
                 except Exception:
                     pass
             self._proc = None
+            # The file watcher dies with the server process; re-arm on the
+            # next spawn.
+            self._watch_started = False
 
-        # Clean up lock files to prevent conflicts
-        try:
-            lock_file = self.code_graph_path / "index.lock"
-            if lock_file.exists():
-                lock_file.unlink()
-        except Exception:
-            pass
+        # Note: .code-graph/index.lock is managed by code-graph-mcp via an OS
+        # handle lock (flock / Windows exclusive handle). There is no stale
+        # state to clean up — the OS releases on process death — and deleting
+        # the lock file would break mutual exclusion between live processes.
 
     def __enter__(self):
         return self
@@ -487,6 +517,67 @@ class CodeGraphBridge:
             str(limit),
         )
 
+    def ast_search(
+        self,
+        query: str = None,
+        node_type: str = None,
+        returns: str = None,
+        params: str = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Structural AST search with type/signature filters.
+
+        Passthrough to the `ast_search` MCP tool — richer than the CLI
+        ast-search because it accepts filters the CLI does not expose
+        (node type, return type, parameter signature).
+
+        At least one of query/node_type/returns/params is required upstream.
+        """
+        args: Dict[str, Any] = {"limit": limit}
+        if query:
+            args["query"] = query
+        if node_type:
+            args["node_type"] = node_type
+        if returns:
+            args["returns"] = returns
+        if params:
+            args["params"] = params
+
+        result = self._call("ast_search", **args)
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            results = result.get("results")
+            if isinstance(results, list):
+                return results
+            if results is None and result:
+                return [result]
+        return []
+
+    def trace_http_route(
+        self,
+        route_path: str,
+        depth: int = 3,
+        include_middleware: bool = True,
+    ) -> Dict[str, Any]:
+        """Trace an HTTP route to its handler and downstream calls.
+
+        Passthrough to the `find_http_route` MCP tool (aliased upstream as
+        `trace_http_chain`). For web projects: given a route like
+        'GET /api/users', returns the handler and its call chain.
+
+        Returns an empty/negative result dict on projects with no indexed
+        routes — not an error.
+        """
+        result = self._call(
+            "find_http_route",
+            route_path=route_path,
+            depth=depth,
+            include_middleware=include_middleware,
+        )
+        normalized = self._normalize_result(result)
+        return normalized if isinstance(normalized, dict) else {"result": normalized}
+
     def get_call_graph(
         self,
         symbol: str,
@@ -512,7 +603,14 @@ class CodeGraphBridge:
 
         return self._mcp_then_cli(
             "get_call_graph",
-            {"symbol_name": symbol, "direction": direction, "depth": depth},
+            {
+                "symbol_name": symbol,
+                "direction": direction,
+                "depth": depth,
+                # Newer servers default to min_confidence="inferred", hiding
+                # ambiguous by-name edges; include them for full blast radius.
+                "min_confidence": "ambiguous",
+            },
             cli_args,
             cli_parsers.parse_callgraph,
         )
@@ -527,12 +625,20 @@ class CodeGraphBridge:
         if not include_source:
             cli_args.append("--compact")
 
-        return self._mcp_then_cli(
+        result = self._mcp_then_cli(
             "get_ast_node",
-            {"symbol_name": symbol, "include_source": include_source},
+            {"symbol_name": symbol},
             cli_args,
             cli_parsers.parse_show,
         )
+        # Newer servers return the source as "code_content" instead of "source"
+        if (
+            isinstance(result, dict)
+            and "source" not in result
+            and "code_content" in result
+        ):
+            result["source"] = result["code_content"]
+        return result
 
     def find_references(
         self,
@@ -544,8 +650,8 @@ class CodeGraphBridge:
         cli_args = ["refs", symbol]
         if file_path:
             cli_args.extend(["--file", file_path])
-        if include_tests:
-            cli_args.append("--include-tests")
+        # Note: the CLI --include-tests flag was removed upstream; the MCP
+        # find_references tool defaults include_tests to true.
 
         def _parser(stdout: str) -> List[Dict[str, Any]]:
             return cli_parsers.parse_refs(stdout)
@@ -565,7 +671,7 @@ class CodeGraphBridge:
         """Get overview of a specific module."""
         return self._mcp_then_cli(
             "module_overview",
-            {"module_path": module_path},
+            {"path": module_path},
             ["overview", module_path],
             cli_parsers.parse_overview,
         )
@@ -674,6 +780,84 @@ class CodeGraphBridge:
         result = self._call("get_index_status")
         return self._normalize_result(result)
 
+    def tour(self, path: str = None) -> Dict[str, Any]:
+        """Dependency-ordered reading tour for the project or a subtree.
+
+        Uses the CLI `tour` command (the Rust MCP server does not expose it as
+        a tool). Lists modules from foundational to entry-point so reading
+        top-to-bottom orients you from the ground up.
+
+        Args:
+            path: Optional subtree to scope the tour to (None = whole project)
+
+        Returns:
+            Dict with a "reading_order" list of module entries, each with
+            path, role, depended_on_by, depends_on, key_symbols, in_cycle
+        """
+        args = ["tour"]
+        if path:
+            args.append(path)
+        args.append("--json")
+        return self._cli_parse(cli_parsers.parse_tour, *args)
+
+    def central_functions(self, limit: int = 15) -> List[Dict[str, Any]]:
+        """Rank functions by betweenness centrality over the call graph.
+
+        CLI-only upstream. Surfaces structural chokepoints that lie on the most
+        shortest call paths between other functions — complementing degree-based
+        hot functions (a chokepoint can have few callers yet route most
+        cross-cluster traffic).
+        """
+        return self._cli_parse(
+            cli_parsers.parse_json_array,
+            "centrality",
+            "--limit",
+            str(limit),
+            "--json",
+        )
+
+    def import_cycles(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Detect circular import dependencies (file-level strongly-connected sets).
+
+        CLI-only upstream. Each entry: files, size, and a representative shortest
+        loop. An empty list means no circular imports — the healthy case.
+        """
+        return self._cli_parse(
+            cli_parsers.parse_json_array,
+            "cycles",
+            "--limit",
+            str(limit),
+            "--json",
+        )
+
+    def surprising_connections(self, limit: int = 15) -> List[Dict[str, Any]]:
+        """Surface unexpected cross-module couplings (uncertain/sole-bridge edges).
+
+        CLI-only upstream. Ranks calls/references edges by resolution confidence
+        (ambiguous > inferred > extracted), module-boundary crossing, and
+        sole-bridge status — good audit input before refactors.
+        """
+        return self._cli_parse(
+            cli_parsers.parse_json_array,
+            "surprising",
+            "--limit",
+            str(limit),
+            "--json",
+        )
+
+    def project_health(self, limit: int = 15) -> Dict[str, Any]:
+        """Aggregate architecture-health snapshot.
+
+        Combines betweenness chokepoints, circular imports, and surprising
+        cross-module couplings into one dict for the trellis_project_health
+        tool / UI health view.
+        """
+        return {
+            "chokepoints": self.central_functions(limit),
+            "import_cycles": self.import_cycles(),
+            "surprising_connections": self.surprising_connections(limit),
+        }
+
     def _run_cli(self, *args, timeout: int = 300) -> Dict[str, Any]:
         """Run code-graph-mcp CLI command.
 
@@ -714,10 +898,14 @@ class CodeGraphBridge:
         }
 
     def sync_project(self) -> Dict[str, Any]:
-        """Sync/index the project codebase.
+        """Full rebuild of the project index.
 
-        Triggers code-graph-mcp to index all source files.
-        Runs 'rebuild-index --confirm' CLI command.
+        Runs 'rebuild-index --confirm' and then re-applies Trellis's Python
+        call-edge and JS dynamic-dispatch augmentations. This is the heavy
+        path — needed once to index a project, and afterwards only after
+        large external changes (huge git pulls, branch switches) or when the
+        index looks stale. Day-to-day edits are picked up automatically by
+        the server-side file watcher (armed by the bridge on every spawn).
         """
         # Close any running MCP server to avoid DB lock conflicts
         self.close()
@@ -755,32 +943,16 @@ class CodeGraphBridge:
         return result
 
     def incremental_sync(self) -> Dict[str, Any]:
-        """Run incremental index update.
+        """Nudge the index — with watch mode there is nothing to rebuild.
 
-        Only indexes changed files since last sync.
-        Runs 'incremental-index' CLI command.
+        The server watches the project and re-indexes changed files on the
+        next tool call, so this no longer shells out to an incremental CLI
+        pass (which required tearing down the live server). It ensures the
+        server and its watcher are running and returns current status; any
+        pending changes are picked up by this very call's freshness check.
         """
-        # Close any running MCP server to avoid DB lock conflicts
-        self.close()
-
-        result = self._run_cli("incremental-index")
-
-        if result["success"]:
-            # Re-run JS augmentor so dynamic-dispatch edges stay in sync
-            try:
-                from .js_graph_augmentor import JSGraphAugmentor
-
-                augmentor = JSGraphAugmentor(
-                    str(self.project_path), str(self.code_graph_path / "index.db")
-                )
-                result["js_augmentor"] = augmentor.augment()
-            except Exception as e:
-                import traceback
-
-                result["js_augmentor_error"] = str(e)
-                result["js_augmentor_traceback"] = traceback.format_exc()
-
-        return result
+        status = self.health_check()
+        return {"success": True, "watching": self._watch_started, "status": status}
 
     # ------------------------------------------------------------------
     # Visualizer API (converts to our format)
@@ -789,10 +961,40 @@ class CodeGraphBridge:
     def get_graph_for_visualizer(self, max_nodes: int = 2000) -> Dict[str, Any]:
         """Get graph data formatted for the visualizer.
 
-        Returns ALL functions for the project (up to max_nodes).
-        Queries SQLite directly for performance.
+        Returns all functions while the project has at most max_nodes
+        functions; larger projects get a simplified view (modules plus one
+        representative function per file) so consumers are never handed an
+        unbounded graph dump.
         """
+        total = self._count_functions()
+        if total > max_nodes:
+            return self._get_simplified_graph({"nodes_count": total})
         return self._get_full_graph()
+
+    def _count_functions(self) -> int:
+        """Count indexed functions/methods (0 when the DB is unavailable)."""
+        import sqlite3
+
+        db_path = self.code_graph_path / "index.db"
+        if not db_path.exists():
+            return 0
+
+        try:
+            conn = sqlite3.connect(str(db_path))
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*)
+                FROM nodes
+                WHERE type IN ('function', 'method')
+                  AND name NOT LIKE 'test_%'
+                  AND name != '__init__'
+                  AND name != '<module>'
+            """)
+            count = cursor.fetchone()[0]
+            conn.close()
+            return count
+        except Exception:
+            return 0
 
     def _get_full_graph(self) -> Dict[str, Any]:
         """Get full detailed graph for small repos.

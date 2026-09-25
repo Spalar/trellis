@@ -6,16 +6,21 @@ This module exposes both HTTP routes (for the visualizer) and MCP tools
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
+import re
+import secrets
 import sys
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse
 
 from typing import TYPE_CHECKING
 
@@ -37,9 +42,193 @@ if os.environ.get("FASTMCP_LOG_LEVEL") is None:
 
 VERSION = "0.2.0"
 
+# ------------------------------------------------------------------
+# Response guards (token/perf protection for coding agents)
+# ------------------------------------------------------------------
+
+# Hard budget for a single MCP tool response. Oversized payloads are rejected
+# with guidance instead of being dumped into the agent's context window.
+MAX_RESPONSE_CHARS = int(os.environ.get("TRELLIS_MAX_RESPONSE_CHARS", "50000"))
+
+# Per-field truncation limits for potentially huge values.
+MAX_CODE_CONTENT_CHARS = 4000
+MAX_NOTE_CONTENT_CHARS = 2000
+
+# trellis_analyze_diff is disabled by default: broad diffs run per-function
+# impact analysis (subprocess per function) and time out. Opt in explicitly.
+DIFF_ANALYSIS_ENABLED = os.environ.get("TRELLIS_ENABLE_DIFF_ANALYSIS", "").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+MAX_DIFF_CHARS = int(os.environ.get("TRELLIS_MAX_DIFF_CHARS", "200000"))
+MAX_DIFF_FILES = int(os.environ.get("TRELLIS_MAX_DIFF_FILES", "50"))
+MAX_DIFF_FUNCTIONS = int(os.environ.get("TRELLIS_MAX_DIFF_FUNCTIONS", "25"))
+
+
+def _dump(payload: Any) -> str:
+    """Serialize a tool response as compact JSON with a hard size budget.
+
+    Compact separators avoid the ~30-50% token overhead of pretty-printing.
+    Payloads beyond MAX_RESPONSE_CHARS are replaced with an actionable error
+    so agents narrow the query instead of receiving a context-filling dump.
+    """
+    text = json.dumps(payload, separators=(",", ":"), default=str)
+    if len(text) > MAX_RESPONSE_CHARS:
+        return json.dumps(
+            {
+                "error": "response_too_large",
+                "size_chars": len(text),
+                "limit_chars": MAX_RESPONSE_CHARS,
+                "hint": (
+                    "Narrow the query: use a specific module_path, feature_name, "
+                    "or function_path, or lower result limits. Raise "
+                    "TRELLIS_MAX_RESPONSE_CHARS only if you really need more."
+                ),
+            }
+        )
+    return text
+
+
+def _truncate(text: str, limit: int) -> str:
+    """Truncate a string field, appending a marker when truncated."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"... [truncated, {len(text)} chars total]"
+
+
+def _project_md_status(project_path) -> Dict[str, str]:
+    """Report whether the repo root has a project.md feature spec.
+
+    Feature-level analysis (feature_info, trace_path, feature impacts) depends
+    on project.md, so agents must create it when missing.
+    """
+    path = Path(project_path) / "project.md"
+    if path.exists():
+        return {"status": "ok", "path": str(path)}
+    return {
+        "status": "missing",
+        "path": str(path),
+        "required_action": (
+            "project.md is missing. You MUST create it before relying on "
+            "feature-level analysis: add a '## Feature: <Name>' section per "
+            "feature with Description, Decisions, Files (glob patterns), and "
+            "Dependencies. See the trellis-mcp skill project.md template."
+        ),
+    }
+
+
+_SERVER_INSTRUCTIONS = """\
+Trellis: graph-based code analysis and knowledge management for this workspace.
+
+Getting started:
+1. Sync once per project: trellis_sync(project_id="<repo name or path>", repo_path="<repo root path>"). Check the project_md field in the response. The index then stays fresh automatically — the graph server watches the repo and re-indexes edited files on its own.
+2. If project_md is "missing", create <repo root>/project.md BEFORE any feature-level work. Format (parsed strictly): one "## Feature: <Name>" section per feature, containing a plain-text description paragraph, then "### Decisions" ("- DEC-001: decision (because: rationale)" with nested "- Constraint: ..."), "### Files" (glob patterns, one per line, e.g. src/auth/**), and "### Dependencies" ("- Feature: <Other Feature>"). Other layouts (tables, "- **Description**:" bullets) are ignored.
+3. Explore with trellis_list_modules and trellis_search_code; inspect symbols with trellis_get_function; understand features with trellis_feature_info.
+4. Before modifying any function, run trellis_analyze_impact on it. The graph reflects your edits automatically — just re-analyze. Run trellis_sync again only after large external changes (big pulls, branch switches) or if results look stale.
+5. Document decisions and feature architecture with trellis_create_note (wiki links [[Note]], code mentions @function).
+
+The full skill document — complete workflow, project.md template, and tool reference — is available as the MCP resource "trellis://skill". Fetch it if the trellis-mcp skill is not installed in your agent.
+"""
+
+# ------------------------------------------------------------------
+# HTTP hardening (CSRF / DNS-rebinding defense for the local server)
+# ------------------------------------------------------------------
+# The HTTP transport serves the visualizer UI, REST-ish custom routes, and
+# the MCP endpoint on 127.0.0.1. Browser-based attackers (malicious websites)
+# can reach localhost servers via simple requests and DNS rebinding, so every
+# HTTP request is checked by _LocalHttpGuard (applied in the transport branch
+# of main()):
+#   1. Host header must be a local hostname — blocks DNS rebinding, and
+#      guarantees the token below is only ever served to a local page.
+#   2. Token: everything except "/" and "/health" must carry the launch
+#      token. TRELLIS_API_KEY is honored as a stable token for MCP-over-HTTP
+#      clients; otherwise a random per-launch token is generated and embedded
+#      into the served visualizer page (never readable cross-origin, since
+#      no CORS headers are ever emitted).
+#   3. If an Origin header is present it must be a local origin — blocks
+#      cross-site form/fetch CSRF on mutating requests.
+
+_HTTP_TOKEN = os.environ.get("TRELLIS_API_KEY", "").strip() or secrets.token_hex(16)
+
+_LOCAL_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
+_LOCAL_HOSTNAMES.add(os.environ.get("TRELLIS_HOST", "127.0.0.1").split(":")[0].strip("[]").lower())
+
+
+def _hostname_of(host_or_origin: str) -> str:
+    """Extract a lowercase hostname from a Host header value or an Origin URL."""
+    value = (host_or_origin or "").strip()
+    if "://" in value:  # Origin header is a URL
+        value = urlsplit(value).netloc
+    if value.startswith("["):
+        return value[1 : value.index("]")].lower()
+    return value.rsplit(":", 1)[0].lower()
+
+
+class _LocalHttpGuard:
+    """Pure-ASGI guard; safe for streaming responses (unlike BaseHTTPMiddleware)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = {
+            key.decode("latin-1").lower(): value.decode("latin-1")
+            for key, value in scope.get("headers", [])
+        }
+        path = scope.get("path", "")
+
+        if _hostname_of(headers.get("host", "")) not in _LOCAL_HOSTNAMES:
+            await self._reject(send, 403, "Forbidden: untrusted Host header")
+            return
+
+        if path not in ("/", "/health") and not path.startswith("/vendor/"):
+            auth = headers.get("authorization", "")
+            token_ok = (
+                auth.startswith("Bearer ")
+                and hmac.compare_digest(auth[7:], _HTTP_TOKEN)
+            ) or (
+                bool(headers.get("x-trellis-token"))
+                and hmac.compare_digest(headers["x-trellis-token"], _HTTP_TOKEN)
+            )
+            if not token_ok:
+                await self._reject(
+                    send,
+                    401,
+                    "Unauthorized: missing or invalid token. Open the Trellis UI "
+                    "for an authenticated session, or set TRELLIS_API_KEY.",
+                )
+                return
+
+        origin = headers.get("origin", "")
+        if origin and _hostname_of(origin) not in _LOCAL_HOSTNAMES:
+            await self._reject(send, 403, "Forbidden: untrusted Origin header")
+            return
+
+        await self.app(scope, receive, send)
+
+    @staticmethod
+    async def _reject(send, status: int, message: str):
+        body = json.dumps({"error": message}).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": status,
+                "headers": [(b"content-type", b"application/json")],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
 mcp = FastMCP(
     "trellis-core",
     version=VERSION,
+    instructions=_SERVER_INSTRUCTIONS,
     strict_input_validation=True,
     mask_error_details=True,
 )
@@ -47,17 +236,45 @@ mcp = FastMCP(
 # ------------------------------------------------------------------
 # State (initialized once at import time)
 # ------------------------------------------------------------------
-_spec_manager = SpecManager()
+# SpecManager resolves project IDs to repo paths lazily via the lambda, so it
+# can be created before _resolve_project_path is defined below.
+_spec_manager = SpecManager(
+    project_resolver=lambda project_id: _resolve_project_path(project_id)
+)
 
-# Cache bridge instances by project path
-_bridge_cache: Dict[str, "CodeGraphBridge"] = {}
+# Cache bridge instances by project path. Bounded: each bridge owns a
+# persistent code-graph-mcp subprocess, so an unbounded cache lets an attacker
+# (or careless agent) spawn one subprocess per distinct project id.
+_BRIDGE_CACHE_MAX = 8
+_bridge_cache: "OrderedDict[str, CodeGraphBridge]" = OrderedDict()
 
 
-def _resolve_project_path(project_id: str) -> str:
+def _require_registered(resolved: Path) -> None:
+    """Reject absolute paths that are not registered projects.
+
+    Without this, an attacker-controlled project id could point the indexer
+    at an arbitrary directory (creating .code-graph inside it and spawning
+    the indexer with an attacker-chosen cwd).
+    """
+    from src.trellis.utils import list_registered_projects
+
+    registered = {
+        Path(p).resolve() for p in list_registered_projects().values()
+    }
+    if resolved not in registered:
+        raise ValueError(
+            f"'{resolved}' is not a registered project. "
+            "Run trellis_sync on it first."
+        )
+
+
+def _resolve_project_path(project_id: str, allow_unregistered: bool = False) -> str:
     """Resolve project ID to actual path.
 
     Searches multiple locations and prefers paths with a .git directory.
     Never resolves to a directory inside the trellis repo to avoid polluting it.
+    Absolute paths are honored only for registered projects unless
+    allow_unregistered=True (the trellis_sync path, which registers them).
     """
     if project_id == "trellis":
         return str(Path(__file__).parent)
@@ -69,6 +286,8 @@ def _resolve_project_path(project_id: str) -> str:
         resolved = path.resolve()
         # Don't allow resolving to inside trellis unless it's trellis itself
         if not _is_inside_trellis(resolved, trellis_root):
+            if not allow_unregistered:
+                _require_registered(resolved)
             return str(resolved)
 
     # Collect all candidate paths (excluding trellis internals)
@@ -92,6 +311,8 @@ def _resolve_project_path(project_id: str) -> str:
 
     # 4. Check if user provided absolute path that doesn't exist yet
     if path.is_absolute():
+        if not allow_unregistered:
+            _require_registered(path.resolve())
         return str(path)
 
     if not candidates:
@@ -115,14 +336,65 @@ def _is_inside_trellis(path: Path, trellis_root: Path) -> bool:
         return False
 
 
-def _get_bridge(project_id: str) -> "CodeGraphBridge":
-    """Get or create bridge for project."""
+def _get_bridge(project_id: str, allow_unregistered: bool = False) -> "CodeGraphBridge":
+    """Get or create bridge for project (LRU-bounded; evicted bridges close)."""
     if project_id not in _bridge_cache:
         from src.trellis import CodeGraphBridge
 
-        resolved = _resolve_project_path(project_id)
+        resolved = _resolve_project_path(project_id, allow_unregistered)
         _bridge_cache[project_id] = CodeGraphBridge(resolved)
+        while len(_bridge_cache) > _BRIDGE_CACHE_MAX:
+            _old_key, _old_bridge = _bridge_cache.popitem(last=False)
+            try:
+                _old_bridge.close()
+            except Exception:
+                pass
+    _bridge_cache.move_to_end(project_id)
     return _bridge_cache[project_id]
+
+
+# ------------------------------------------------------------------
+# Skill resource (bootstrap for agents without the trellis-mcp skill)
+# ------------------------------------------------------------------
+
+_SKILL_FALLBACK = """\
+# Trellis MCP — Getting Started (bundled fallback)
+
+1. Run trellis_sync(project_id="<repo name>", repo_path="<repo root>") and check the project_md field.
+2. If project_md is "missing", create <repo root>/project.md before feature-level work:
+   one "## Feature: <Name>" section per feature with a plain-text description,
+   "### Decisions" (- DEC-001: text (because: rationale)), "### Files" (glob patterns,
+   one per line), "### Dependencies" (- Feature: <Name>).
+3. Explore: trellis_list_modules, trellis_search_code, trellis_get_function, trellis_feature_info.
+4. Before changing code: trellis_analyze_impact. The graph re-indexes edits automatically (file watcher) — just re-analyze; re-run trellis_sync only after large pulls or if results look stale.
+5. Document with trellis_create_note ([[wiki links]] and @code mentions).
+
+Install the trellis-mcp skill (skills/ folder in the Trellis distribution) for the full workflow.
+"""
+
+
+def _load_skill_content() -> str:
+    """Read the bundled SKILL.md; fall back to a built-in getting-started summary."""
+    candidates = [Path(__file__).parent / "skills" / "trellis-mcp" / "SKILL.md"]
+    if getattr(sys, "frozen", False):
+        candidates.insert(0, Path(sys.executable).parent / "skills" / "trellis-mcp" / "SKILL.md")
+    for path in candidates:
+        try:
+            if path.exists():
+                return path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+    return _SKILL_FALLBACK
+
+
+@mcp.resource("trellis://skill", mime_type="text/markdown")
+async def trellis_skill_resource() -> str:
+    """Full trellis-mcp skill document (workflow, project.md format, tool reference).
+
+    Fetch this when the trellis-mcp skill is not installed in your agent —
+    it contains everything needed to use these tools effectively.
+    """
+    return _load_skill_content()
 
 
 # ------------------------------------------------------------------
@@ -139,7 +411,10 @@ async def trellis_sync(
 ) -> str:
     """Sync a project repository into the graph.
 
-    Uses code-graph-mcp to index the codebase.
+    Run ONCE per project to build the initial index. After that the index
+    stays fresh by itself: the server watches the project and re-indexes
+    edited files automatically. Call again only after large external changes
+    (big git pulls, branch switches) or when tool results look stale.
     """
     try:
         # Clear bridge cache for this project to avoid DB lock conflicts
@@ -148,7 +423,12 @@ async def trellis_sync(
             _bridge_cache[cache_key].close()
             del _bridge_cache[cache_key]
 
-        bridge = _get_bridge(cache_key)
+        # trellis_sync is the registration path: it may point at a repo that
+        # has never been synced. All other tools require a registered project.
+        from src.trellis import CodeGraphBridge
+
+        resolved = _resolve_project_path(cache_key, allow_unregistered=True)
+        bridge = CodeGraphBridge(resolved)
 
         # Trigger actual indexing
         if incremental:
@@ -165,7 +445,7 @@ async def trellis_sync(
         bridge = _get_bridge(cache_key)
         health = bridge.health_check()
 
-        return json.dumps(
+        return _dump(
             {
                 "status": "ok",
                 "project_id": project_id,
@@ -173,11 +453,11 @@ async def trellis_sync(
                 "files": health.get("files_count", 0),
                 "message": "Project synced successfully",
                 "sync_details": sync_result,
-            },
-            indent=2,
+                "project_md": _project_md_status(bridge.project_path),
+            }
         )
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _dump({"error": str(e)})
 
 
 @mcp.tool()
@@ -193,6 +473,9 @@ async def trellis_module_overview(
     Example:
       trellis_module_overview(project_id='tui.image-editor', module_path='apps/image-editor/src/js/component')
     """
+    MAX_FILES = 50
+    MAX_SYMBOLS_PER_FILE = 50
+
     try:
         bridge = _get_bridge(project_id)
 
@@ -201,9 +484,8 @@ async def trellis_module_overview(
 
         db_path = resolve_code_graph_db(bridge.project_path)
         if not db_path.exists():
-            return json.dumps(
-                {"error": "No code-graph database found. Run trellis_sync first."},
-                indent=2,
+            return _dump(
+                {"error": "No code-graph database found. Run trellis_sync first."}
             )
 
         like_pattern = f"%{module_path}%"
@@ -224,9 +506,17 @@ async def trellis_module_overview(
         )
 
         files: Dict[str, List[Dict[str, Any]]] = {}
+        truncated = False
         for row in cursor.fetchall():
             file_path, kind, name, qname, line = row
-            files.setdefault(file_path, []).append(
+            if len(files) >= MAX_FILES and file_path not in files:
+                truncated = True
+                continue
+            symbols = files.setdefault(file_path, [])
+            if len(symbols) >= MAX_SYMBOLS_PER_FILE:
+                truncated = True
+                continue
+            symbols.append(
                 {
                     "kind": kind,
                     "name": name,
@@ -260,16 +550,16 @@ async def trellis_module_overview(
 
         conn.close()
 
-        return json.dumps(
+        return _dump(
             {
                 "module_path": module_path,
                 "files": files,
                 "outgoing_edges": outgoing,
-            },
-            indent=2,
+                "truncated": truncated,
+            }
         )
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _dump({"error": str(e)})
 
 
 @mcp.tool()
@@ -309,9 +599,9 @@ async def trellis_analyze_impact(
             "divergence_warnings": report.get("divergence_warnings", []),
         }
 
-        return json.dumps(result, indent=2)
+        return _dump(result)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _dump({"error": str(e)})
 
 
 @mcp.tool()
@@ -381,9 +671,15 @@ async def trellis_get_function(
                 else:
                     node = {"error": f"Function '{symbol}' not found in index"}
 
-        return json.dumps(node, indent=2)
+        # Cap source payload so large functions don't flood the context
+        if isinstance(node, dict) and isinstance(node.get("code_content"), str):
+            node["code_content"] = _truncate(
+                node["code_content"], MAX_CODE_CONTENT_CHARS
+            )
+
+        return _dump(node)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _dump({"error": str(e)})
 
 
 @mcp.tool()
@@ -402,9 +698,44 @@ async def trellis_search_code(
     try:
         bridge = _get_bridge(project_id)
         results = bridge.search(query, limit=limit)
-        return json.dumps({"results": results}, indent=2)
+        return _dump({"results": results})
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _dump({"error": str(e)})
+
+
+@mcp.tool()
+async def trellis_ast_search(
+    project_id: str = "",
+    query: str = "",
+    node_type: str = "",
+    returns: str = "",
+    params: str = "",
+    limit: int = 20,
+) -> str:
+    """Structural AST search with type/signature filters.
+
+    Finds symbols by structure, not just keyword: filter by node type
+    (function/method/class/...), return type, or parameter signature. At least
+    one of query/node_type/returns/params is required. Complements
+    trellis_search_code (keyword/semantic search).
+
+    Examples:
+      trellis_ast_search(project_id='tui.image-editor', node_type='class')
+      trellis_ast_search(project_id='tui.image-editor', query='render', node_type='method')
+      trellis_ast_search(project_id='tui.image-editor', returns='Promise')
+    """
+    try:
+        bridge = _get_bridge(project_id)
+        results = bridge.ast_search(
+            query=query or None,
+            node_type=node_type or None,
+            returns=returns or None,
+            params=params or None,
+            limit=limit,
+        )
+        return _dump({"results": results})
+    except Exception as e:
+        return _dump({"error": str(e)})
 
 
 @mcp.tool()
@@ -419,7 +750,7 @@ async def trellis_list_modules(
         bridge = _get_bridge(project_id)
         pmap = bridge.project_map()
         modules = pmap.get("modules", [])
-        return json.dumps(
+        return _dump(
             {
                 "modules": [
                     {
@@ -430,11 +761,10 @@ async def trellis_list_modules(
                     }
                     for m in modules
                 ]
-            },
-            indent=2,
+            }
         )
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _dump({"error": str(e)})
 
 
 @mcp.tool()
@@ -452,9 +782,18 @@ async def trellis_feature_info(
     try:
         bridge = _get_bridge(project_id)
         info = bridge.get_feature_info(feature_name)
-        return json.dumps(info, indent=2, default=str)
+
+        # Cap note payload so long architecture notes don't flood the context
+        note = info.get("note")
+        if isinstance(note, dict) and isinstance(note.get("content"), str):
+            note["content"] = _truncate(note["content"], MAX_NOTE_CONTENT_CHARS)
+
+        if not info.get("found_in_spec"):
+            info["project_md"] = _project_md_status(bridge.project_path)
+
+        return _dump(info)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _dump({"error": str(e)})
 
 
 @mcp.tool()
@@ -480,9 +819,8 @@ async def trellis_trace_path(
 
         db_path = resolve_code_graph_db(bridge.project_path)
         if not db_path.exists():
-            return json.dumps(
-                {"error": "No code-graph database found. Run trellis_sync first."},
-                indent=2,
+            return _dump(
+                {"error": "No code-graph database found. Run trellis_sync first."}
             )
 
         # Resolve feature names to file patterns via project.md
@@ -519,13 +857,9 @@ async def trellis_trace_path(
         to_files = _files_for(to_patterns)
 
         if not from_files:
-            return json.dumps(
-                {"error": f"Feature/module '{from_feature}' not found"}, indent=2
-            )
+            return _dump({"error": f"Feature/module '{from_feature}' not found"})
         if not to_files:
-            return json.dumps(
-                {"error": f"Feature/module '{to_feature}' not found"}, indent=2
-            )
+            return _dump({"error": f"Feature/module '{to_feature}' not found"})
 
         # Direct edges: source in from_files, target in to_files
         from_ph = ",".join("?" * len(from_files))
@@ -595,7 +929,7 @@ async def trellis_trace_path(
 
         conn.close()
 
-        return json.dumps(
+        return _dump(
             {
                 "from_feature": from_feature,
                 "to_feature": to_feature,
@@ -607,27 +941,108 @@ async def trellis_trace_path(
                 "direct_connection_count": len(direct),
                 "outbound_intermediate": outbound[:10],
                 "inbound_intermediate": inbound[:10],
-            },
-            indent=2,
+            }
         )
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _dump({"error": str(e)})
 
 
 @mcp.tool()
 async def trellis_get_graph(
     project_id: str = "",
+    max_nodes: int = 200,
 ) -> str:
     """Get code graph data (nodes, edges, modules) for the project.
 
-    Returns raw graph data suitable for visualization or analysis.
+    Large graphs are expensive for agents: when the project has more than
+    max_nodes functions, a simplified view (modules + one representative
+    function per file) is returned instead of the full dump. Prefer
+    trellis_analyze_impact / trellis_trace_path for targeted questions.
+
+    Args:
+        project_id: Project to analyze
+        max_nodes: Max function nodes before switching to the simplified view
     """
     try:
         bridge = _get_bridge(project_id)
-        graph = bridge.get_graph_for_visualizer(max_nodes=200)
-        return json.dumps(graph, indent=2)
+        graph = bridge.get_graph_for_visualizer(max_nodes=max_nodes)
+        return _dump(graph)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _dump({"error": str(e)})
+
+
+@mcp.tool()
+async def trellis_tour(
+    project_id: str = "",
+    path: str = "",
+) -> str:
+    """Get a dependency-ordered reading tour of the project (or a subtree).
+
+    Lists modules from foundational to entry-point (Kahn topological sort over
+    import edges), so reading top-to-bottom orients you from the ground up.
+    Each entry includes the module path, its role, what it depends on, how many
+    modules depend on it, key symbols, and whether it sits in an import cycle.
+
+    Use when onboarding to a codebase or exploring an unfamiliar module.
+
+    Example:
+      trellis_tour(project_id='tui.image-editor')
+      trellis_tour(project_id='tui.image-editor', path='apps/image-editor/src/js')
+    """
+    try:
+        bridge = _get_bridge(project_id)
+        result = bridge.tour(path or None)
+        return _dump(result)
+    except Exception as e:
+        return _dump({"error": str(e)})
+
+
+@mcp.tool()
+async def trellis_trace_http_route(
+    project_id: str = "",
+    route_path: str = "",
+    depth: int = 3,
+) -> str:
+    """Trace an HTTP route to its handler and downstream calls (web projects).
+
+    Given a route like 'GET /api/users' or '/api/users', returns the handler
+    symbol and its downstream call chain (middleware included by default,
+    capped at depth). Only useful for projects with indexed HTTP routes
+    (FastAPI/Flask/Express/etc.); others return a 'no routes found' result.
+
+    Example:
+      trellis_trace_http_route(project_id='my-api', route_path='POST /api/login')
+    """
+    try:
+        bridge = _get_bridge(project_id)
+        result = bridge.trace_http_route(route_path, depth=depth)
+        return _dump(result)
+    except Exception as e:
+        return _dump({"error": str(e)})
+
+
+@mcp.tool()
+async def trellis_project_health(
+    project_id: str = "",
+    limit: int = 15,
+) -> str:
+    """Architecture-health snapshot: chokepoints, import cycles, surprising couplings.
+
+    Returns three sections:
+      chokepoints — functions ranked by betweenness centrality over the call
+        graph (structural bridges; few callers but high cross-cluster traffic)
+      import_cycles — circular file-level import dependencies (empty = healthy)
+      surprising_connections — uncertain or sole-bridge cross-module calls/
+        references edges worth auditing before a refactor
+
+    Example:
+      trellis_project_health(project_id='tui.image-editor', limit=10)
+    """
+    try:
+        bridge = _get_bridge(project_id)
+        return _dump(bridge.project_health(limit))
+    except Exception as e:
+        return _dump({"error": str(e)})
 
 
 @mcp.tool()
@@ -647,9 +1062,8 @@ async def trellis_detect_hotspots(
 
         db_path = resolve_code_graph_db(bridge.project_path)
         if not db_path.exists():
-            return json.dumps(
-                {"error": "No code-graph database found. Run trellis_sync first."},
-                indent=2,
+            return _dump(
+                {"error": "No code-graph database found. Run trellis_sync first."}
             )
 
         hotspots = []
@@ -684,20 +1098,23 @@ async def trellis_detect_hotspots(
         except Exception:
             pass
 
-        return json.dumps({"hotspots": hotspots}, indent=2)
+        return _dump({"hotspots": hotspots})
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _dump({"error": str(e)})
 
 
-@mcp.tool()
 async def trellis_analyze_diff(
     project_id: str = "",
     diff: str = "",
     compare_branch: str = "",
 ) -> str:
-    """Analyze impact of a code diff.
+    """Analyze impact of a code diff. (Disabled by default)
 
     Automatically detects changed functions from git diff and runs impact analysis.
+    Broad diffs are expensive (one impact analysis per changed function), so this
+    tool is only registered when TRELLIS_ENABLE_DIFF_ANALYSIS=1 and is hard-capped
+    via TRELLIS_MAX_DIFF_CHARS / TRELLIS_MAX_DIFF_FILES / TRELLIS_MAX_DIFF_FUNCTIONS.
+    For per-function checks prefer trellis_analyze_impact.
 
     Args:
         project_id: Project to analyze
@@ -742,29 +1159,42 @@ async def trellis_analyze_diff(
                     diff = repo.git.diff(target)
 
                 if not diff:
-                    return json.dumps(
+                    return _dump(
                         {
                             "status": "no_changes",
                             "message": "No changes detected in git working tree",
                             "project": project_id,
-                        },
-                        indent=2,
+                        }
                     )
 
             except ImportError:
-                return json.dumps(
+                return _dump(
                     {
                         "error": "GitPython not installed. Either install it (pip install GitPython) or provide the diff parameter directly: trellis_analyze_diff(project_id='...', diff='...')",
-                    },
-                    indent=2,
+                    }
                 )
             except git.InvalidGitRepositoryError:
-                return json.dumps(
+                return _dump(
                     {
                         "error": f"'{resolved_real}' is not a git repository.\n\nTo fix:\n1. Pass the absolute path: trellis_analyze_diff(project_id='/path/to/repo')\n2. Or provide the diff directly: trellis_analyze_diff(project_id='{project_id}', diff='...')",
-                    },
-                    indent=2,
+                    }
                 )
+
+        # Guard against huge diffs that cannot be processed within tool timeouts
+        if len(diff) > MAX_DIFF_CHARS:
+            return _dump(
+                {
+                    "error": "diff_too_large",
+                    "size_chars": len(diff),
+                    "limit_chars": MAX_DIFF_CHARS,
+                    "hint": (
+                        "Diff is too large to analyze in one call. Narrow the scope "
+                        "(e.g. compare a single commit or file) or run "
+                        "trellis_analyze_impact on the specific functions you changed. "
+                        "Raise TRELLIS_MAX_DIFF_CHARS to override."
+                    ),
+                }
+            )
 
         # Step 2: Parse unified diff to find changed files and line numbers
         changed_files = {}  # file_path -> set of changed line numbers
@@ -809,13 +1239,30 @@ async def trellis_analyze_diff(
         changed_files = {f: lines for f, lines in changed_files.items() if lines}
 
         if not changed_files:
-            return json.dumps(
+            return _dump(
                 {
                     "status": "no_changes",
                     "message": "No file changes detected in diff",
                     "diff_length": len(diff),
-                },
-                indent=2,
+                }
+            )
+
+        # Guard against broad diffs: per-function impact analysis spawns a
+        # subprocess per function and cannot finish within tool timeouts.
+        if len(changed_files) > MAX_DIFF_FILES:
+            return _dump(
+                {
+                    "status": "diff_too_broad",
+                    "changed_files_count": len(changed_files),
+                    "limit_files": MAX_DIFF_FILES,
+                    "changed_files": sorted(changed_files.keys())[:MAX_DIFF_FILES],
+                    "hint": (
+                        "Too many changed files for whole-diff impact analysis. "
+                        "Run trellis_analyze_impact on the specific functions you "
+                        "changed, or narrow the diff (single commit/file). Raise "
+                        "TRELLIS_MAX_DIFF_FILES to override."
+                    ),
+                }
             )
 
         # Step 3: Query SQLite to find affected functions
@@ -872,15 +1319,20 @@ async def trellis_analyze_diff(
                 # Continue without function-level details
                 pass
 
-        # Step 4: Run impact analysis on unique affected functions
+        # Step 4: Run impact analysis on unique affected functions (hard-capped:
+        # each analysis spawns subprocesses, so unbounded loops time out)
         bridge = _get_bridge(project_id)
         impact_results = []
         analyzed_symbols = set()
+        functions_capped = False
 
         for func in affected_functions:
             symbol = func["qualified_name"] or func["name"]
             if symbol in analyzed_symbols:
                 continue
+            if len(analyzed_symbols) >= MAX_DIFF_FUNCTIONS:
+                functions_capped = True
+                break
             analyzed_symbols.add(symbol)
 
             try:
@@ -931,7 +1383,7 @@ async def trellis_analyze_diff(
             if "affected_functions" in r
         )
 
-        return json.dumps(
+        return _dump(
             {
                 "status": "ok",
                 "project": project_id,
@@ -940,14 +1392,20 @@ async def trellis_analyze_diff(
                 "changed_files": list(changed_files.keys()),
                 "affected_functions_count": len(affected_functions),
                 "unique_functions_analyzed": len(impact_results),
+                "functions_capped": functions_capped,
+                "max_functions": MAX_DIFF_FUNCTIONS if functions_capped else None,
                 "total_downstream_affected": total_affected_funcs,
                 "functions": impact_results,
-            },
-            indent=2,
+            }
         )
 
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _dump({"error": str(e)})
+
+
+# Diff analysis is opt-in: broad diffs time out and flood the agent context.
+if DIFF_ANALYSIS_ENABLED:
+    mcp.tool()(trellis_analyze_diff)
 
 
 @mcp.tool()
@@ -960,15 +1418,14 @@ async def trellis_get_boundary_map(
         pmap = bridge.project_map()
         modules = pmap.get("modules", [])
         deps = pmap.get("dependencies", [])
-        return json.dumps(
+        return _dump(
             {
                 "modules": [m.get("path") for m in modules],
                 "dependencies": deps,
-            },
-            indent=2,
+            }
         )
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _dump({"error": str(e)})
 
 
 # ------------------------------------------------------------------
@@ -997,18 +1454,17 @@ async def trellis_create_note(
         tag_list = [t.strip() for t in tags.split(",")] if tags else []
         note = graph.save_note(note_id, content, title=title, tags=tag_list)
 
-        return json.dumps(
+        return _dump(
             {
                 "status": "ok",
                 "note_id": note.id,
                 "title": note.title,
                 "links": note.links,
                 "mentions": note.mentions,
-            },
-            indent=2,
+            }
         )
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _dump({"error": str(e)})
 
 
 @mcp.tool()
@@ -1025,9 +1481,9 @@ async def trellis_get_note(
         note = graph.get_note(note_id)
 
         if not note:
-            return json.dumps({"error": f"Note '{note_id}' not found"}, indent=2)
+            return _dump({"error": f"Note '{note_id}' not found"})
 
-        return json.dumps(
+        return _dump(
             {
                 "id": note.id,
                 "title": note.title,
@@ -1038,11 +1494,10 @@ async def trellis_get_note(
                 "backlinks": graph.get_backlinks(note_id),
                 "created": note.created_at,
                 "updated": note.updated_at,
-            },
-            indent=2,
+            }
         )
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _dump({"error": str(e)})
 
 
 @mcp.tool()
@@ -1058,7 +1513,7 @@ async def trellis_search_notes(
         graph = NoteGraph(resolved)
         results = graph.search_notes(query)
 
-        return json.dumps(
+        return _dump(
             {
                 "query": query,
                 "results": [
@@ -1072,11 +1527,10 @@ async def trellis_search_notes(
                     }
                     for n in results
                 ],
-            },
-            indent=2,
+            }
         )
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _dump({"error": str(e)})
 
 
 @mcp.tool()
@@ -1092,34 +1546,49 @@ async def trellis_delete_note(
         graph = NoteGraph(resolved)
         success = graph.delete_note(note_id)
 
-        return json.dumps(
+        return _dump(
             {
                 "status": "ok" if success else "error",
                 "message": f"Note '{note_id}' deleted"
                 if success
                 else f"Note '{note_id}' not found",
-            },
-            indent=2,
+            }
         )
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _dump({"error": str(e)})
 
 
 @mcp.tool()
 async def trellis_knowledge_graph(
     project_id: str = "",
+    include_code: bool = False,
 ) -> str:
-    """Get the full knowledge graph (notes + code nodes + edges)."""
+    """Get the knowledge graph (notes + edges).
+
+    Code nodes are excluded by default: including them dumps every function in
+    the project into the agent's context. Pass include_code=True only when you
+    specifically need note-to-code edges. Note contents are truncated; use
+    trellis_get_note for full content.
+
+    Args:
+        project_id: Project to analyze
+        include_code: Include code function nodes (large; default False)
+    """
     try:
         from src.trellis.knowledge_graph import NoteGraph
 
         resolved = _resolve_project_path(project_id)
         graph = NoteGraph(resolved)
-        data = graph.build_graph(include_code=True)
+        data = graph.build_graph(include_code=include_code)
 
-        return json.dumps(data, indent=2)
+        # Truncate note contents in graph nodes; full text via trellis_get_note
+        for node in data.get("nodes", []):
+            if isinstance(node.get("content"), str):
+                node["content"] = _truncate(node["content"], MAX_NOTE_CONTENT_CHARS)
+
+        return _dump(data)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _dump({"error": str(e)})
 
 
 # ------------------------------------------------------------------
@@ -1129,10 +1598,16 @@ async def trellis_knowledge_graph(
 
 @mcp.custom_route("/", methods=["GET"])
 async def root(request: Request):
-    """Serve visualizer HTML."""
+    """Serve visualizer HTML with the launch token embedded."""
     visualizer_path = Path(__file__).parent / "visualizer.html"
     if visualizer_path.exists():
-        return FileResponse(visualizer_path)
+        html = visualizer_path.read_text(encoding="utf-8")
+        token_script = f'<script>window.TRELLIS_TOKEN = "{_HTTP_TOKEN}";</script>'
+        if "</head>" in html:
+            html = html.replace("</head>", token_script + "</head>", 1)
+        else:
+            html = token_script + html
+        return HTMLResponse(html)
     return JSONResponse({"message": "Trellis MCP Server", "version": VERSION})
 
 
@@ -1140,6 +1615,23 @@ async def root(request: Request):
 async def health(request: Request):
     """Health check."""
     return JSONResponse({"status": "ok", "version": VERSION})
+
+
+@mcp.custom_route("/vendor/{filename}", methods=["GET"])
+async def vendor_assets(request: Request):
+    """Serve vendored JS libraries (d3, marked) — local, no CDN.
+
+    Loaded via <script src> from the UI page, which cannot send custom
+    headers, so these public static assets are exempt from the token check
+    (the guard middleware whitelists the /vendor/ prefix too).
+    """
+    filename = request.path_params["filename"]
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", filename):
+        return JSONResponse({"error": "Invalid filename"}, status_code=400)
+    asset = Path(__file__).parent / "vendor" / filename
+    if not asset.is_file():
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    return FileResponse(asset)
 
 
 @mcp.custom_route("/graph/{project_id}", methods=["GET"])
@@ -1150,6 +1642,71 @@ async def graph_get(request: Request):
         bridge = _get_bridge(project_id)
         graph = bridge.get_graph_for_visualizer()
         return JSONResponse(graph)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/graph/{project_id}/sync", methods=["POST"])
+async def graph_sync(request: Request):
+    """Full index rebuild. Heavy — edits are otherwise indexed automatically
+    by the server-side file watcher (armed by the bridge on every spawn), so
+    this is only needed after large external changes or when stale."""
+    import asyncio
+
+    project_id = request.path_params["project_id"]
+    try:
+        bridge = _get_bridge(project_id)
+        result = await asyncio.to_thread(bridge.sync_project)
+        return JSONResponse(
+            {
+                "success": result.get("success", False),
+                "stdout": result.get("stdout", ""),
+                "stderr": result.get("stderr", ""),
+            }
+        )
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/graph/{project_id}/status", methods=["GET"])
+async def graph_status(request: Request):
+    """Index status including whether the file watcher is active."""
+    project_id = request.path_params["project_id"]
+    try:
+        bridge = _get_bridge(project_id)
+        return JSONResponse(bridge.health_check())
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/graph/{project_id}/tour", methods=["GET"])
+async def graph_tour(request: Request):
+    """Dependency-ordered reading tour (foundational -> entry-point modules)."""
+    import asyncio
+
+    project_id = request.path_params["project_id"]
+    path = request.query_params.get("path") or None
+    try:
+        bridge = _get_bridge(project_id)
+        result = await asyncio.to_thread(bridge.tour, path)
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/graph/{project_id}/health", methods=["GET"])
+async def graph_health(request: Request):
+    """Architecture-health snapshot (chokepoints, import cycles, surprising edges)."""
+    import asyncio
+
+    project_id = request.path_params["project_id"]
+    limit = request.query_params.get("limit")
+    try:
+        bridge = _get_bridge(project_id)
+        result = await asyncio.to_thread(
+            bridge.project_health, int(limit) if limit else 15
+        )
+        return JSONResponse(result)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -1200,6 +1757,7 @@ async def spec_handler(request: Request):
 
     if request.method == "GET":
         spec = _spec_manager.load_spec(project_id)
+        repo_spec_path = str(Path(_resolve_project_path(project_id)) / "project.md")
         if spec is None:
             template = _spec_manager.create_template(project_id)
             return JSONResponse(
@@ -1207,6 +1765,7 @@ async def spec_handler(request: Request):
                     "project_id": project_id,
                     "status": "no_spec",
                     "content": template,
+                    "path": repo_spec_path,
                 }
             )
         return JSONResponse(
@@ -1214,14 +1773,108 @@ async def spec_handler(request: Request):
                 "project_id": project_id,
                 "status": "ok",
                 "content": spec.content,
+                "path": spec.source_path,
             }
         )
 
     else:  # POST
         body = await request.json()
         content = body.get("content", "")
-        _spec_manager.save_spec(project_id, content)
-        return JSONResponse({"project_id": project_id, "status": "ok"})
+        path = _spec_manager.save_spec(project_id, content)
+        return JSONResponse(
+            {"project_id": project_id, "status": "ok", "path": str(path)}
+        )
+
+
+@mcp.custom_route("/spec/{project_id}/alignment", methods=["GET"])
+async def spec_alignment(request: Request):
+    """Verify how well project.md features align with the synced code graph.
+
+    For each parsed feature: which indexed files its glob patterns match, how
+    many functions map to it, and what is wrong or missing (no patterns,
+    patterns matching nothing, zero functions, missing description).
+    Also reports indexed files not covered by any feature.
+    """
+    project_id = request.path_params["project_id"]
+    try:
+        from src.trellis.feature_impact import ProjectContextParser
+        from src.trellis.utils import resolve_code_graph_db
+
+        bridge = _get_bridge(project_id)
+        parser = ProjectContextParser(str(bridge.project_path))
+        features = parser.get_all_features()
+
+        # All indexed source files from the code graph DB
+        files = []
+        db_path = resolve_code_graph_db(str(bridge.project_path))
+        if db_path.exists():
+            import sqlite3
+
+            conn = sqlite3.connect(str(db_path))
+            files = [row[0] for row in conn.execute("SELECT path FROM files")]
+            conn.close()
+
+        def match_files(patterns):
+            matched = []
+            for path in files:
+                for pattern in patterns:
+                    regex = pattern.replace("**", ".*").replace("*", "[^/]*")
+                    if re.search(regex, path):
+                        matched.append(path)
+                        break
+            return matched
+
+        feature_rows = []
+        covered_files = set()
+        for name, feature in features.items():
+            matched = match_files(feature.file_patterns)
+            covered_files.update(matched)
+            functions = bridge.get_feature_functions(name)
+            issues = []
+            if not feature.file_patterns:
+                issues.append("no file patterns - add a '### Files' section")
+            elif not matched:
+                issues.append("file patterns match no indexed files")
+            if not functions:
+                issues.append("no functions mapped to this feature")
+            if not feature.description:
+                issues.append("no description")
+            feature_rows.append(
+                {
+                    "name": name,
+                    "description": feature.description,
+                    "file_patterns": feature.file_patterns,
+                    "matched_files": matched,
+                    "matched_file_count": len(matched),
+                    "function_count": len(functions),
+                    "decision_count": len(feature.decisions),
+                    "constraints_count": len(feature.constraints),
+                    "dependencies": feature.dependencies,
+                    "issues": issues,
+                }
+            )
+
+        unmapped_files = [f for f in files if f not in covered_files]
+        return JSONResponse(
+            {
+                "project_id": project_id,
+                "spec_status": _project_md_status(bridge.project_path),
+                "total_files": len(files),
+                "covered_file_count": len(covered_files),
+                "unmapped_files": unmapped_files,
+                "features": feature_rows,
+                "summary": {
+                    "feature_count": len(feature_rows),
+                    "features_with_issues": sum(
+                        1 for f in feature_rows if f["issues"]
+                    ),
+                    "fully_aligned": all(not f["issues"] for f in feature_rows)
+                    and not unmapped_files,
+                },
+            }
+        )
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @mcp.custom_route("/knowledge-graph/{project_id}", methods=["GET"])
@@ -1286,6 +1939,8 @@ async def note_handler(request: Request):
             return JSONResponse(
                 {"status": "ok", "message": f"Note '{note_id}' deleted"}
             )
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -1349,27 +2004,44 @@ async def feature_divergence(request: Request):
 
 @mcp.custom_route("/projects", methods=["GET"])
 async def list_projects(request: Request):
-    """List synced projects with graph data."""
+    """List synced projects with graph data.
+
+    Projects register themselves in ~/.trellis/projects/<id>/project.json
+    when synced; the code graph itself lives in each project's own
+    .code-graph directory. Legacy entries with a centralized .code-graph
+    are still listed.
+    """
     from src.trellis.utils import get_trellis_data_dir
 
     projects = []
 
-    # Only show projects that have been synced (have .code-graph data)
     trellis_data = get_trellis_data_dir()
     projects_dir = trellis_data / "projects"
     if projects_dir.exists():
         for item in projects_dir.iterdir():
-            if item.is_dir():
-                code_graph_dir = item / ".code-graph"
-                # Only include if .code-graph exists and has index.db
-                if code_graph_dir.exists() and (code_graph_dir / "index.db").exists():
+            if not item.is_dir():
+                continue
+            marker = item / "project.json"
+            if marker.exists():
+                try:
+                    repo_path = Path(json.loads(marker.read_text(encoding="utf-8"))["path"])
+                except (json.JSONDecodeError, KeyError, OSError):
+                    continue
+                if (repo_path / ".code-graph" / "index.db").exists():
                     projects.append(
-                        {
-                            "id": item.name,
-                            "name": item.name,
-                            "path": str(item),
-                        }
+                        {"id": item.name, "name": item.name, "path": str(repo_path)}
                     )
+                continue
+            # Legacy: centralized .code-graph stored under the data dir
+            code_graph_dir = item / ".code-graph"
+            if code_graph_dir.exists() and (code_graph_dir / "index.db").exists():
+                projects.append(
+                    {
+                        "id": item.name,
+                        "name": item.name,
+                        "path": str(item),
+                    }
+                )
 
     return JSONResponse({"projects": projects})
 
@@ -1387,7 +2059,11 @@ if __name__ == "__main__":
             from src.trellis.launcher import setup_environment, open_browser
 
             setup_environment()
-            open_browser()
+            # Browser auto-open only makes sense for the standalone HTTP app.
+            # When an MCP client spawns the exe over stdio (TRELLIS_TRANSPORT=stdio
+            # preset in its env), opening a browser on every session would be wrong.
+            if os.environ.get("TRELLIS_TRANSPORT") == "http":
+                open_browser()
         except ImportError:
             pass
 
@@ -1403,7 +2079,7 @@ if __name__ == "__main__":
         import uvicorn
 
         uvicorn.run(
-            mcp.http_app(),
+            _LocalHttpGuard(mcp.http_app()),
             host=os.environ.get("TRELLIS_HOST", "127.0.0.1"),
             port=int(os.environ.get("TRELLIS_PORT", "17317")),
         )
