@@ -10,8 +10,10 @@ from trellis import app
 
 if __name__ == "__main__":
     print("Starting Trellis Visualizer API...")
-    print("URL: http://localhost:17318")
+    print("URL: http://127.0.0.1:17318")
     print("Press Ctrl+C to stop")
     print()
 
-    uvicorn.run(app, host="0.0.0.0", port=17318)
+    # Local-only: this server has no authentication, so it must never bind
+    # publicly. The UI it serves is same-origin, so no CORS is needed.
+    uvicorn.run(app, host="127.0.0.1", port=17318)

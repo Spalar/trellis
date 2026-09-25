@@ -19,6 +19,20 @@ from datetime import datetime
 
 from .utils import get_notes_path, resolve_code_graph_db
 
+# Note ids become "<id>.md" filenames under the notes dir. Anything that can
+# act as a path separator or traverse directories must be rejected here, at
+# the sink, so both MCP tools and HTTP routes are covered (on Windows, "\"
+# and "%5C" are separators too, and pathlib discards the base for absolute
+# operands — the regex rules all of that out).
+_NOTE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _note_path(notes_dir: Path, note_id: str) -> Path:
+    """Resolve a note id to its file, rejecting path traversal."""
+    if not note_id or not _NOTE_ID_RE.match(note_id) or ".." in note_id:
+        raise ValueError(f"Invalid note id: {note_id!r}")
+    return notes_dir / f"{note_id}.md"
+
 
 @dataclass
 class Note:
@@ -233,15 +247,19 @@ class NoteGraph:
         self, note_id: str, content: str, title: str = None, tags: List[str] = None
     ) -> Note:
         """Save or update a note."""
-        path = self.notes_dir / f"{note_id}.md"
+        path = _note_path(self.notes_dir, note_id)
 
         now = datetime.now().isoformat()
 
+        # Strip newlines so injected title/tags cannot forge frontmatter keys.
+        safe_title = (title or note_id).replace("\r", " ").replace("\n", " ")
+        safe_tags = [t.replace("\r", " ").replace("\n", " ") for t in tags] if tags else None
+
         # Build frontmatter
         frontmatter = ["---"]
-        frontmatter.append(f"title: {title or note_id}")
-        if tags:
-            frontmatter.append(f"tags: {', '.join(tags)}")
+        frontmatter.append(f"title: {safe_title}")
+        if safe_tags:
+            frontmatter.append(f"tags: {', '.join(safe_tags)}")
         frontmatter.append(f"updated: {now}")
         frontmatter.append("---")
         frontmatter.append("")
@@ -258,7 +276,7 @@ class NoteGraph:
             return self.notes[note_id]
 
         # Try loading from disk
-        path = self.notes_dir / f"{note_id}.md"
+        path = _note_path(self.notes_dir, note_id)
         if path.exists():
             return self._load_note(path)
 
@@ -266,7 +284,7 @@ class NoteGraph:
 
     def delete_note(self, note_id: str) -> bool:
         """Delete a note."""
-        path = self.notes_dir / f"{note_id}.md"
+        path = _note_path(self.notes_dir, note_id)
         if path.exists():
             path.unlink()
             if note_id in self.notes:

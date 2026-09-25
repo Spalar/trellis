@@ -268,6 +268,11 @@ class SecurityScanner:
             "Error message pointing to Rust install docs; no actual request made",
         ),
         (
+            r"127\.0\.0\.1:17317/mcp",
+            "Hardcoded HTTP(S) URL",
+            "Loopback default URL emitted into user-generated MCP client configs; Trellis never requests it",
+        ),
+        (
             r"shutil\.rmtree\(project_code_graph\)",
             "Python recursive delete",
             "Trellis removes old .code-graph directory during migration to data dir",
@@ -286,6 +291,106 @@ class SecurityScanner:
             r"shutil\.rmtree\(data_dir,\s*ignore_errors=True\)",
             "Python recursive delete",
             "Clean up local .trellis data before rebuild",
+        ),
+        # --- code-graph-mcp v0.156.0 (upstream, reviewed at pull upgrade) ---
+        # Snapshot installer: HTTPS-only downloads with blake3 checksum
+        # verification and redirect-downgrade protection. Inert in Trellis:
+        # auto-install requires CODE_GRAPH_SNAPSHOT_TRUST_URL/_ORIGIN/_PIN env
+        # vars that Trellis never sets, so no network egress is reachable.
+        (
+            r"reqwest::blocking::Client",
+            "HTTP client usage",
+            "snapshot installer's HTTPS-only client (blake3-verified, redirect-downgrade guarded); not reachable from Trellis integration",
+        ),
+        (
+            r"reqwest::redirect::Policy::custom",
+            "HTTP client usage",
+            "redirect policy rejecting non-HTTPS hops in the snapshot installer; not reachable from Trellis integration",
+        ),
+        (
+            r"std::net::TcpListener",
+            "Standard network usage",
+            "test-only loopback redirect server for the integrity-downgrade regression test",
+        ),
+        (
+            r"127\.0\.0\.1:\{port\}",
+            "Hardcoded HTTP(S) URL",
+            "loopback URLs in the redirect-downgrade regression test",
+        ),
+        (
+            r"TcpListener::bind\(\"127\.0\.0\.1:0\"\)",
+            "Standard network usage",
+            "test-only loopback redirect server for the integrity-downgrade regression test",
+        ),
+        (
+            r"starts_with\(\"https://\"\)",
+            "Hardcoded HTTP(S) URL",
+            "scheme allow-list validation for snapshot URLs, not a network request",
+        ),
+        (
+            r"strip_prefix\(\"https://github\.com/\"\)",
+            "Hardcoded HTTP(S) URL",
+            "normalizing GitHub remote URLs for snapshot release lookup",
+        ),
+        (
+            r"snapshot url must be https://",
+            "Hardcoded HTTP(S) URL",
+            "error message for a rejected non-HTTPS snapshot URL",
+        ),
+        (
+            r"(example\.com|\.invalid)",
+            "Hardcoded HTTP(S) URL",
+            "non-resolvable placeholder hosts in upstream tests",
+        ),
+        (
+            r"github\.com/(octo-cat|o/)",
+            "Hardcoded HTTP(S) URL",
+            "fake repository paths in upstream URL-parsing tests",
+        ),
+        (
+            r"sqlite\.org/mmap",
+            "Hardcoded HTTP(S) URL",
+            "documentation URL inside a SQL comment",
+        ),
+        (
+            r"\bCommand::new\(\"git\"\)",
+            "Rust Command creation",
+            "read-only git metadata commands (rev-parse, ls-remote); no shell, no user-controlled args",
+        ),
+        (
+            r"\bCommand::new\(\"git\"\)",
+            "Rust process execution",
+            "read-only git metadata commands (rev-parse, ls-remote); no shell, no user-controlled args",
+        ),
+        (
+            r"\bCommand::new\(\"gh\"\)",
+            "Rust Command creation",
+            "GitHub CLI metadata lookup during snapshot install (not reachable from Trellis)",
+        ),
+        (
+            r"\bCommand::new\(\"gh\"\)",
+            "Rust process execution",
+            "GitHub CLI metadata lookup during snapshot install (not reachable from Trellis)",
+        ),
+        (
+            r"std::process::Child",
+            "Rust child process",
+            "child-process handle for the git/gh metadata commands above",
+        ),
+        (
+            r"remove_dir_all\((ent\.path\(\)|self\.0|&staging|&old)\)",
+            "Recursive directory deletion",
+            "embed-model cache/staging cleanup; the embed-model feature is disabled in Trellis builds",
+        ),
+        (
+            r"remove_dir_all\(&tmp\)",
+            "Recursive directory deletion",
+            "upstream cleanup of its own temporary directory",
+        ),
+        (
+            r"shutil\.rmtree\(tmp, ignore_errors=True\)",
+            "Python recursive delete",
+            "upstream embedding-benchmark dev scripts cleaning their own temp dirs; not shipped or run by Trellis",
         ),
     ]
 
@@ -379,11 +484,13 @@ class SecurityScanner:
 
                     # Test files are not shipped in release; downgrade severity
                     path_str = str(rel_path).replace("\\", "/")
+                    stem = Path(path_str).stem.lower()
                     if (
                         "/tests/" in path_str
                         or "/benches/" in path_str
                         or path_str.startswith("tests/")
                         or path_str.startswith("benches/")
+                        or stem in ("test", "tests")  # upstream Rust: src/snapshot/tests.rs
                     ):
                         if severity in (Severity.CRITICAL, Severity.HIGH):
                             severity = Severity.LOW

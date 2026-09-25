@@ -9,22 +9,12 @@ from pathlib import Path
 from typing import Dict
 
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from .bridge import CodeGraphBridge
 
 
 app = FastAPI(title="Trellis Visualizer API")
-
-# Enable CORS for visualizer
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # Cache bridge instances by project path
 _bridge_cache: Dict[str, CodeGraphBridge] = {}
@@ -44,6 +34,19 @@ async def root():
     if visualizer_path.exists():
         return FileResponse(visualizer_path)
     return {"message": "Trellis Visualizer API"}
+
+
+@app.get("/vendor/{filename}")
+async def vendor_assets(filename: str):
+    """Serve vendored JS libraries (d3, marked) — local, no CDN."""
+    import re
+
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", filename):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    asset = Path(__file__).parent.parent.parent / "vendor" / filename
+    if not asset.is_file():
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(asset)
 
 
 @app.get("/graph/{project_id}")
@@ -203,7 +206,7 @@ def _resolve_project_path(project_id: str) -> Path:
     """Resolve project ID to path.
 
     Supports:
-    - Absolute paths
+    - Absolute paths of registered projects (see utils.list_registered_projects)
     - Relative paths from current directory
     - Special IDs like 'trellis' for the trellis repo itself
     """
@@ -212,6 +215,15 @@ def _resolve_project_path(project_id: str) -> Path:
 
     path = Path(project_id)
     if path.is_absolute():
+        from .utils import list_registered_projects
+
+        registered = {
+            Path(p).resolve() for p in list_registered_projects().values()
+        }
+        if path.resolve() not in registered:
+            raise ValueError(
+                f"'{path}' is not a registered project. Run trellis_sync on it first."
+            )
         return path
 
     # Try relative to current directory
@@ -231,4 +243,4 @@ def _resolve_project_path(project_id: str) -> Path:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=17318)
+    uvicorn.run(app, host="127.0.0.1", port=17318)

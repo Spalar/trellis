@@ -1,7 +1,7 @@
 """Shared utilities for Trellis."""
 
+import json
 import os
-import shutil
 from pathlib import Path
 
 
@@ -29,32 +29,14 @@ def _is_junction(path: Path) -> bool:
         return False
 
 
-def _create_windows_junction(link_path: Path, target_path: Path) -> bool:
-    """Create a Windows directory junction using mklink /J.
-
-    Junctions don't require admin privileges on Windows.
-    Returns True if successful.
-    """
-    import subprocess
-
-    try:
-        result = subprocess.run(
-            ["cmd", "/c", "mklink", "/J", str(link_path), str(target_path)],
-            capture_output=True,
-            text=True,
-            shell=False,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
 def get_code_graph_path(project_path: Path) -> Path:
     """Get the path where .code-graph should be stored.
 
-    By default, stores in trellis data directory (~/.trellis/projects/{name}/.code-graph)
-    to avoid polluting project directories. Creates a symlink/junction in the project
-    directory for compatibility with code-graph-mcp.
+    The index lives in the project directory itself (`<repo>/.code-graph`) —
+    code-graph-mcp resolves the DB path from the project root and refuses
+    symlinked directories (v0.37+). Legacy symlinks/junctions into the
+    trellis data directory are removed; a stale index is wiped and rebuilt
+    by code-graph-mcp on first open anyway (INDEX_VERSION bump).
 
     Args:
         project_path: Path to the project repository
@@ -63,77 +45,77 @@ def get_code_graph_path(project_path: Path) -> Path:
         Path to the .code-graph directory
     """
     project_path = project_path.resolve()
-    project_id = project_path.name
+    code_graph_dir = project_path / ".code-graph"
 
-    # Trellis data location
-    trellis_data = get_trellis_data_dir()
-    code_graph_dir = trellis_data / "projects" / project_id / ".code-graph"
-    code_graph_dir.mkdir(parents=True, exist_ok=True)
-
-    # Link in project directory
-    project_code_graph = project_path / ".code-graph"
-
-    if not project_code_graph.exists():
-        # Try to create a symlink first
+    if code_graph_dir.is_symlink():
         try:
-            project_code_graph.symlink_to(code_graph_dir, target_is_directory=True)
-        except (OSError, NotImplementedError):
-            # On Windows, try junction instead
-            if os.name == "nt":
-                if _create_windows_junction(project_code_graph, code_graph_dir):
-                    pass  # Junction created successfully
-                else:
-                    # Fallback: use project directory directly
-                    return project_code_graph
-            else:
-                # Fallback: use project directory directly
-                return project_code_graph
-    elif project_code_graph.is_symlink() or (
-        os.name == "nt" and _is_junction(project_code_graph)
-    ):
-        # Ensure link points to correct location
+            code_graph_dir.unlink()
+        except OSError:
+            pass  # locked: mkdir below tolerates the existing link
+    elif os.name == "nt" and _is_junction(code_graph_dir):
         try:
-            if project_code_graph.is_symlink():
-                current_target = project_code_graph.readlink()
-                if current_target != code_graph_dir:
-                    project_code_graph.unlink()
-                    project_code_graph.symlink_to(
-                        code_graph_dir, target_is_directory=True
-                    )
-            # For junctions, just verify it resolves correctly
+            code_graph_dir.rmdir()  # removing a junction removes only the link
         except OSError:
             pass
-    elif project_code_graph.is_dir():
-        # Legacy: .code-graph exists in project directory
-        # Migrate to trellis data directory
-        if not code_graph_dir.exists():
-            try:
-                shutil.copytree(project_code_graph, code_graph_dir)
-            except (PermissionError, OSError):
-                # Can't copy (files locked), use project directory
-                return project_code_graph
-        # Try to replace with link
-        try:
-            shutil.rmtree(project_code_graph)
-            project_code_graph.symlink_to(code_graph_dir, target_is_directory=True)
-        except (OSError, NotImplementedError, PermissionError):
-            if os.name == "nt":
-                if not _create_windows_junction(project_code_graph, code_graph_dir):
-                    # Can't create link, use project directory
-                    return project_code_graph
-            else:
-                # Can't create link, use project directory
-                return project_code_graph
 
+    code_graph_dir.mkdir(parents=True, exist_ok=True)
+    if code_graph_dir.is_symlink() or _is_junction(code_graph_dir):
+        raise RuntimeError(
+            f"Refusing to use symlinked/junction .code-graph directory: {code_graph_dir}. "
+            "Remove the link and re-sync the project."
+        )
+    _record_project(project_path)
     return code_graph_dir
+
+
+def _record_project(project_path: Path) -> None:
+    """Record a project in the trellis data dir so the UI can list it.
+
+    Writes ~/.trellis/projects/<name>/project.json with the repo path. The
+    code graph itself no longer lives there (see get_code_graph_path), but
+    notes and this registry stay centralized.
+    """
+    try:
+        project_dir = get_trellis_data_dir() / "projects" / project_path.name
+        project_dir.mkdir(parents=True, exist_ok=True)
+        marker = project_dir / "project.json"
+        payload = {"path": str(project_path)}
+        if not marker.exists() or marker.read_text(encoding="utf-8") != json.dumps(
+            payload
+        ):
+            marker.write_text(json.dumps(payload), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def list_registered_projects() -> dict:
+    """Return registered projects as {project_id: repo_path}.
+
+    Reads the registry markers written by _record_project. Used by the UI
+    project list and to validate that an absolute path is a known project
+    before a bridge/indexer is pointed at it.
+    """
+    projects = {}
+    projects_dir = get_trellis_data_dir() / "projects"
+    if projects_dir.exists():
+        for item in projects_dir.iterdir():
+            marker = item / "project.json"
+            if not item.is_dir() or not marker.exists():
+                continue
+            try:
+                repo_path = Path(json.loads(marker.read_text(encoding="utf-8"))["path"])
+            except (json.JSONDecodeError, KeyError, OSError):
+                continue
+            projects[item.name] = str(repo_path)
+    return projects
 
 
 def get_notes_path(project_path: Path) -> Path:
     """Get the path where knowledge notes should be stored.
 
-    Stores notes alongside the code-graph index in the trellis data directory
-    (~/.trellis/projects/{id}/.trellis/notes) to avoid polluting project
-    directories.
+    Notes stay centralized in the trellis data directory
+    (~/.trellis/projects/<id>/.trellis/notes) so they are shared across
+    checkouts of the same repo and never pollute the project directory.
 
     Args:
         project_path: Path to the project repository
@@ -141,8 +123,8 @@ def get_notes_path(project_path: Path) -> Path:
     Returns:
         Path to the notes directory
     """
-    code_graph_dir = get_code_graph_path(project_path)
-    notes_dir = code_graph_dir.parent / ".trellis" / "notes"
+    project_path = project_path.resolve()
+    notes_dir = get_trellis_data_dir() / "projects" / project_path.name / ".trellis" / "notes"
     notes_dir.mkdir(parents=True, exist_ok=True)
     return notes_dir
 
