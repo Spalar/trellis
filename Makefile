@@ -1,5 +1,5 @@
 # Trellis Core - Makefile
-.PHONY: install dev trellis-dev-vscode run run-http test lint format clean check
+.PHONY: install dev trellis-dev-vscode mcp-config run run-http test lint format clean check
 
 PYTHON ?= python
 VENV := .venv
@@ -34,6 +34,9 @@ ifeq ($(OS),Windows_NT)
 else
 	TRELLIS_ALLOW_NO_AUTH=true FASTMCP_SHOW_SERVER_BANNER=false FASTMCP_LOG_LEVEL=ERROR $(PYTHON_VENV) -m server
 endif
+
+mcp-config:
+	$(PYTHON_VENV) scripts/mcp_setup.py
 
 trellis-dev-vscode:
 	$(PYTHON_VENV) -c "import json, os; cfg={'servers': {'trellis-core': {'type': 'stdio', 'command': os.path.abspath(r'$(PYTHON_VENV)'), 'args': [os.path.abspath('server.py')], 'cwd': os.path.abspath('.'), 'env': {'TRELLIS_ALLOW_NO_AUTH': 'true', 'FASTMCP_SHOW_SERVER_BANNER': 'false', 'FASTMCP_LOG_LEVEL': 'ERROR'}}}, 'inputs': []}; print(json.dumps(cfg, indent=2))"

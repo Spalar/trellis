@@ -85,22 +85,27 @@ Trellis supports two transports. Both use **JSON-RPC** for MCP protocol messages
 make dev
 ```
 
-This starts the MCP server over stdio using JSON-RPC messages. To configure your MCP client:
+This starts the MCP server over stdio using JSON-RPC messages. To configure your MCP client, use the setup helper — one command detects your OS, asks which client you use and which server type you want (stdio or HTTP), and prints the correct config with OS-correct paths for Windows, macOS, and Linux:
 
-**VS Code / Copilot Chat:**
 ```bash
-make trellis-dev-vscode
+make mcp-config                # interactive
+# or directly:
+python scripts/mcp_setup.py --client codex --transport stdio --print
 ```
-This prints the exact JSON config to add to your VS Code MCP settings.
 
-**Claude Desktop** (`claude_desktop_config.json`):
+By default it **prints** the config and the exact config-file location so you can verify it works with your client. Once verified, re-run with `--write` to merge it into the client's config file (existing entries are kept; the previous file is backed up to `.bak`).
+
+Supported presets (stdio and HTTP): **Claude Code**, **Claude Desktop**, **OpenAI Codex**, **Kimi Code** (CLI, user or project scope), **VS Code / GitHub Copilot agent mode**, **Cursor**. Pick **"Unknown / other platform"** to get a full linking kit — both transports, the generic `mcpServers` snippet, and every known config location — so any other client can be linked by hand.
+
+**IDE extensions:** the VS Code extensions of Claude Code, Kimi Code, and Codex wrap their respective CLI, so generate the CLI's config — the extension launches the same CLI and picks it up. GitHub Copilot agent mode reads `.vscode/mcp.json` directly (the `vscode` preset). Kimi Code in Zed/JetBrains/Paseo runs via `kimi acp`, which reads `~/.kimi-code/mcp.json` or the project's `.kimi-code/mcp.json` (the `kimi-code` preset).
+
+**Claude Desktop example** (what the generator produces, macOS/Linux paths shown):
 ```json
 {
   "mcpServers": {
     "trellis-core": {
       "command": "/path/to/trellis/.venv/bin/python",
       "args": ["/path/to/trellis/server.py"],
-      "cwd": "/path/to/trellis",
       "env": {
         "TRELLIS_ALLOW_NO_AUTH": "true",
         "FASTMCP_SHOW_SERVER_BANNER": "false",
@@ -110,6 +115,8 @@ This prints the exact JSON config to add to your VS Code MCP settings.
   }
 }
 ```
+
+**Legacy:** `make trellis-dev-vscode` still prints the VS Code stdio snippet only.
 
 ### Mode 2: HTTP Server (for Web UI + MCP over HTTP)
 
@@ -196,6 +203,7 @@ Open `http://localhost:17317` for the interactive visualizer.
 | `make install` | Install Python dependencies and create venv |
 | `make dev` | Start MCP stdio server (for AI agents) |
 | `make run-http` | Start HTTP server on port 17317 |
+| `make mcp-config` | Interactive MCP client config generator (all providers) |
 | `make trellis-dev-vscode` | Print VS Code MCP configuration |
 | `make test` | Run test suite |
 | `make lint` | Run ruff linter |

@@ -76,7 +76,9 @@ Python wrapper around code-graph-mcp with:
 - `sync_project()` - Index codebase
 - `analyze_impact(symbol)` - Technical impact analysis
 - `search(query)` - Symbol search
-- `get_graph_for_visualizer()` - Graph data for UI
+- `get_graph_for_visualizer(max_nodes)` - Graph data for UI; returns a simplified
+  view (modules + representative functions) when the project exceeds `max_nodes`
+  functions, so large graphs are never dumped in full
 
 ### 3. Knowledge Graph (Python)
 
@@ -110,7 +112,15 @@ Dual-mode server:
 **MCP Tools**:
 - Code graph: sync, search, get_function, analyze_impact, trace_path, detect_hotspots
 - Doc graph: create_note, get_note, search_notes, delete_note, knowledge_graph
-- Analysis: analyze_diff, get_boundary_map
+- Analysis: get_boundary_map; analyze_diff (opt-in via `TRELLIS_ENABLE_DIFF_ANALYSIS=1`)
+
+**Response guards** (agent context protection):
+- Compact JSON with a hard size budget (`TRELLIS_MAX_RESPONSE_CHARS`, default 50000)
+- `trellis_get_graph` switches to a simplified view above `max_nodes` (default 200)
+- `trellis_knowledge_graph` excludes code nodes unless `include_code=True`
+- Long fields truncated: `code_content` (4000 chars), note content (2000 chars)
+- `trellis_analyze_diff` (when enabled) caps: `TRELLIS_MAX_DIFF_CHARS` (200k),
+  `TRELLIS_MAX_DIFF_FILES` (50), `TRELLIS_MAX_DIFF_FUNCTIONS` (25)
 
 **HTTP Endpoints**:
 - `/graph/{project_id}` - Graph data

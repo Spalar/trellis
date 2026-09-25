@@ -164,7 +164,7 @@ Handles user authentication and session management.
 | `trellis_feature_info` | Get project.md feature spec + related functions |
 | `trellis_trace_path` | Understand how two features or modules interact |
 | `trellis_detect_hotspots` | Find high-centrality functions |
-| `trellis_get_graph` | Get raw code graph data |
+| `trellis_get_graph` | Graph data (simplified view when > `max_nodes` functions) |
 ### Doc Graph Tools
 | Tool | When to Use |
 |------|-------------|
@@ -172,13 +172,15 @@ Handles user authentication and session management.
 | `trellis_get_note` | Read full note content |
 | `trellis_search_notes` | Find notes by keyword |
 | `trellis_delete_note` | Remove note |
-| `trellis_knowledge_graph` | Get full doc graph |
+| `trellis_knowledge_graph` | Get doc graph (code nodes only with `include_code=True`) |
 
 ### Analysis Tools
 | Tool | When to Use |
 |------|-------------|
-| `trellis_analyze_diff` | Before/after code changes |
+| `trellis_analyze_diff` | **Disabled by default** (`TRELLIS_ENABLE_DIFF_ANALYSIS=1`); prefer `trellis_analyze_impact` per changed function |
 | `trellis_get_boundary_map` | Identify module boundaries |
+
+> All tool responses are compact JSON capped at `TRELLIS_MAX_RESPONSE_CHARS` (default 50000). Oversized responses return a `response_too_large` error — narrow the query instead.
 
 ## Setup
 

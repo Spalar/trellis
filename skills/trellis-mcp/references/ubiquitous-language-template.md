@@ -20,9 +20,27 @@ Use this template to create a `project.md` file in the repository root. Update i
 
 ## Features
 
-| Feature | Description | Key Files | Dependencies |
-|---------|-------------|-----------|--------------|
-| [Feature Name] | [What it does] | [Main files] | [Other features it uses] |
+One `## Feature:` section per feature, in the exact format Trellis parses (see the
+Project.md section of SKILL.md):
+
+```markdown
+## Feature: [Feature Name]
+
+[Plain-text description — plain sentences, no bullet props.]
+
+### Decisions
+- ABC-001: [Decision] (because: [rationale])
+  - Constraint: [Hard rule this decision imposes]
+
+### Files
+- [glob/pattern/**]
+
+### Dependencies
+- Feature: [Other feature this one depends on]
+```
+
+Keep the domain dictionary tables below for terminology; feature specs themselves must
+use the section format above — table rows are not parsed as features.
 
 ## Conventions
 
@@ -73,9 +91,21 @@ Use this template to create a `project.md` file in the repository root. Update i
 ### Feature Entry
 
 ```markdown
-| Feature | Description | Key Files | Dependencies |
-|---------|-------------|-----------|--------------|
-| AuthService | User authentication and session management | src/auth/*.ts | UserRepository, EmailService |
+## Feature: AuthService
+
+User authentication and session management. Owns login, logout, and token refresh.
+
+### Decisions
+- AUTH-001: Use JWT access tokens (because: stateless API)
+  - Constraint: Token expiry must be < 24h
+
+### Files
+- src/auth/**
+- src/middleware/auth*
+
+### Dependencies
+- Feature: UserRepository
+- Feature: EmailService
 ```
 
 ### Decision Entry

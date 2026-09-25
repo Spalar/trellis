@@ -12,7 +12,9 @@
         "TRELLIS_ALLOW_NO_AUTH": "true",
         "FASTMCP_SHOW_SERVER_BANNER": "false",
         "FASTMCP_LOG_LEVEL": "ERROR",
-        "TRELLIS_DATA_DIR": "C:\\path\\to\\trellis\\.trellis\\data"
+        "TRELLIS_DATA_DIR": "C:\\path\\to\\trellis\\.trellis\\data",
+        "TRELLIS_MAX_RESPONSE_CHARS": "50000",
+        "TRELLIS_ENABLE_DIFF_ANALYSIS": "false"
       },
       "enabled": true,
       "timeout": 10000

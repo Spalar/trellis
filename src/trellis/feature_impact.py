@@ -65,65 +65,174 @@ class ProjectContextParser:
         self._parse()
 
     def _parse(self) -> None:
-        """Parse project.md and extract features."""
+        """Parse project.md and extract features.
+
+        Tolerates free-form project documentation: any "## " heading that is not
+        a feature heading ends the current feature, so sections like
+        "## Overview" or "## How It Works" can hold general project info
+        without polluting feature data. Feature fields can also be written as
+        bullet props ("- **Files**: a, b") in addition to "### Files" sections.
+
+        Canonical format:
+        ## Feature: Authentication
+        Description: Handles user authentication
+        #
+        # ### Decisions
+        # - DEC-001: Use JWT tokens (because: stateless)
+        #   - Constraint: Token expiry must be < 24h
+        #
+        # ### Files
+        # - src/auth/**
+        #
+        # ### Dependencies
+        # - Feature: User Management
+        """
         if not self.spec_file.exists():
             return
 
         content = self.spec_file.read_text(encoding="utf-8")
 
-        # Parse features from markdown
-        # Format:
-        # ## Feature: Authentication
-        # Description: Handles user authentication
-        #
-        # ### Decisions
-        # - DEC-001: Use JWT tokens (because: stateless)
-        #   - Constraint: Token expiry must be < 24h
-        #   - Constraint: Refresh tokens stored in httpOnly cookies
-        #
-        # ### Files
-        # - src/auth/**
-        # - src/middleware/auth*
-        #
-        # ### Dependencies
-        # - Feature: User Management
-
         current_feature = None
         current_section = None
         current_decision = None
-        line_count = 0
+        gen_decision_counter = 0
+
+        def add_decision_line(feature, line):
+            """Parse a "- ..." decision line; synthesize an ID when missing."""
+            nonlocal gen_decision_counter, current_decision
+            match = re.match(
+                r"-\s*(\w+-\d+):\s*(.+?)(?:\s*\(because:\s*(.+)\))?\s*$", line
+            )
+            if match:
+                decision_id, description, rationale = (
+                    match.group(1),
+                    match.group(2),
+                    match.group(3) or "",
+                )
+            else:
+                gen_decision_counter += 1
+                decision_id = f"GEN-{gen_decision_counter:03d}"
+                body = re.sub(r"^-\s*", "", line).strip()
+                because = re.search(r"\s*\(because:\s*(.+)\)\s*$", body)
+                if because:
+                    description = body[: because.start()].strip()
+                    rationale = because.group(1)
+                else:
+                    description = body
+                    rationale = ""
+            current_decision = FeatureDecision(
+                decision_id=decision_id,
+                description=description,
+                rationale=rationale,
+            )
+            feature.decisions.append(current_decision)
+
+        def add_patterns_or_deps(feature, value, kind):
+            """Split a comma/space-separated bullet-prop value into entries."""
+            for item in re.split(r"[,;]", value):
+                item = item.strip().strip("`")
+                if not item:
+                    continue
+                if kind == "files":
+                    feature.file_patterns.append(item)
+                else:
+                    if item.lower().startswith("feature:"):
+                        item = item.split(":", 1)[1].strip()
+                    if item.lower() not in ("none", "n/a", "-"):
+                        feature.dependencies.append(item)
 
         for line in content.splitlines():
-            line_count += 1
             line_stripped = line.strip()
 
-            # Feature header - more flexible matching
-            if line_stripped.startswith("## Feature:") or line_stripped.startswith(
-                "## Feature "
-            ):
-                # Extract feature name after "Feature:"
-                if ":" in line_stripped:
-                    feature_name = line_stripped.split(":", 1)[1].strip()
+            # Any level-2 heading starts a new block. Only feature headings
+            # open a feature; everything else (Overview, How It Works, ...)
+            # closes the current one so free-form content is ignored.
+            if line_stripped.startswith("## "):
+                heading = line_stripped[3:].strip().lower()
+                if heading.startswith("feature:") or heading.startswith("feature "):
+                    if ":" in line_stripped:
+                        feature_name = line_stripped.split(":", 1)[1].strip()
+                    else:
+                        feature_name = line_stripped.replace("## Feature", "").strip()
+                    feature_name = feature_name.strip("*` ")
+                    current_feature = FeatureSpec(feature_name=feature_name)
+                    self.features[feature_name] = current_feature
                 else:
-                    feature_name = line_stripped.replace("## Feature", "").strip()
-
-                current_feature = FeatureSpec(feature_name=feature_name)
-                self.features[feature_name] = current_feature
+                    current_feature = None
                 current_section = None
                 current_decision = None
+                continue
 
-            # Skip if no feature yet
+            # Skip anything outside a feature section (project overview, etc.)
             if not current_feature:
                 continue
 
             # Section headers
-            elif line_stripped.startswith("### "):
-                section_name = line_stripped.replace("###", "").strip().lower()
-                current_section = section_name
+            if line_stripped.startswith("### "):
+                current_section = line_stripped.replace("###", "").strip().lower()
                 current_decision = None
+                continue
+
+            # Bullet props: - **Description**: / - **Files**: / etc.
+            prop = re.match(r"-\s*\*\*([A-Za-z ]+)\*\*:\s*(.*)$", line_stripped)
+            if prop:
+                key = prop.group(1).strip().lower()
+                value = prop.group(2).strip()
+                if key == "description" and value:
+                    current_feature.description = (
+                        current_feature.description + " " + value
+                    ).strip()
+                elif key in ("files", "file patterns"):
+                    add_patterns_or_deps(current_feature, value, "files")
+                elif key == "dependencies":
+                    add_patterns_or_deps(current_feature, value, "deps")
+                elif key == "decisions" and value:
+                    add_decision_line(current_feature, f"- {value}")
+                continue
+
+            # Constraints under decisions (must be checked before decision entries)
+            if (
+                current_decision
+                and line_stripped.startswith("-")
+                and "constraint:" in line_stripped.lower()
+            ):
+                constraint = re.sub(
+                    r"-\s*constraint:\s*", "", line_stripped, flags=re.IGNORECASE
+                ).strip()
+                current_decision.constraints.append(constraint)
+                continue
+
+            # Decisions
+            if current_section == "decisions" and line_stripped.startswith("-"):
+                add_decision_line(current_feature, line_stripped)
+                continue
+
+            # Constraints under feature
+            if current_section == "constraints" and line_stripped.startswith("-"):
+                constraint = line_stripped.replace("-", "", 1).strip()
+                current_feature.constraints.append(constraint)
+                continue
+
+            # File patterns
+            if current_section in (
+                "files",
+                "file patterns",
+            ) and line_stripped.startswith("-"):
+                pattern = line_stripped.replace("-", "", 1).strip().strip("`")
+                if pattern:
+                    current_feature.file_patterns.append(pattern)
+                continue
+
+            # Dependencies
+            if current_section == "dependencies" and line_stripped.startswith("-"):
+                dep = line_stripped.replace("-", "", 1).strip()
+                if dep.startswith("Feature:"):
+                    dep = dep.replace("Feature:", "").strip()
+                current_feature.dependencies.append(dep)
+                continue
 
             # Description (before any section, non-empty, not a list item)
-            elif (
+            if (
                 line_stripped
                 and not current_section
                 and not line_stripped.startswith("-")
@@ -133,58 +242,6 @@ class ProjectContextParser:
                     current_feature.description = line_stripped
                 else:
                     current_feature.description += " " + line_stripped
-
-            # Constraints under decisions (must be checked before decision entries)
-            elif (
-                current_decision
-                and line_stripped.startswith("-")
-                and "constraint:" in line_stripped.lower()
-            ):
-                constraint = re.sub(
-                    r"-\s*constraint:\s*", "", line_stripped, flags=re.IGNORECASE
-                ).strip()
-                current_decision.constraints.append(constraint)
-
-            # Decisions
-            elif current_section == "decisions" and line_stripped.startswith("-"):
-                # Parse decision: - DEC-001: Description (because: rationale)
-                decision_match = re.match(
-                    r"-\s*(\w+-\d+):\s*(.+?)(?:\s*\(because:\s*(.+)\))?\s*$",
-                    line_stripped,
-                )
-                if decision_match:
-                    decision_id = decision_match.group(1)
-                    description = decision_match.group(2)
-                    rationale = decision_match.group(3) or ""
-
-                    current_decision = FeatureDecision(
-                        decision_id=decision_id,
-                        description=description,
-                        rationale=rationale,
-                    )
-                    current_feature.decisions.append(current_decision)
-
-            # Constraints under feature
-            elif current_section == "constraints" and line_stripped.startswith("-"):
-                constraint = line_stripped.replace("-", "", 1).strip()
-                current_feature.constraints.append(constraint)
-
-            # File patterns
-            elif current_section in (
-                "files",
-                "file patterns",
-            ) and line_stripped.startswith("-"):
-                pattern = line_stripped.replace("-", "", 1).strip()
-                current_feature.file_patterns.append(pattern)
-
-            # Dependencies
-            elif current_section == "dependencies" and line_stripped.startswith("-"):
-                dep = line_stripped.replace("-", "", 1).strip()
-                if dep.startswith("Feature:"):
-                    dep = dep.replace("Feature:", "").strip()
-                current_feature.dependencies.append(dep)
-
-        # Parsing complete
 
     def get_feature_for_file(self, file_path: str) -> Optional[FeatureSpec]:
         """Find which feature owns a file.
@@ -197,10 +254,16 @@ class ProjectContextParser:
         """
         for feature in self.features.values():
             for pattern in feature.file_patterns:
-                # Convert glob to regex
+                # Convert glob to regex; skip patterns that fail to compile
+                # (project.md is repo content and may contain regex
+                # metacharacters — an invalid pattern must not break every
+                # feature tool for the whole project).
                 regex_pattern = pattern.replace("**", ".*").replace("*", "[^/]*")
-                if re.search(regex_pattern, file_path):
-                    return feature
+                try:
+                    if re.search(regex_pattern, file_path):
+                        return feature
+                except re.error:
+                    continue
         return None
 
     def get_all_features(self) -> Dict[str, FeatureSpec]:

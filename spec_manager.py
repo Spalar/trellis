@@ -90,12 +90,22 @@ class ProjectSpec:
 
 
 class SpecManager:
-    """Manages project.md specs for all projects."""
+    """Manages project.md specs for all projects.
 
-    def __init__(self, base_dir: str = None) -> None:
+    The single source of truth is `<repo root>/project.md` — the same file
+    feature analysis parses. The data directory copy is kept only as a legacy
+    fallback for projects that cannot be resolved to a repo path.
+    """
+
+    def __init__(
+        self, base_dir: str = None, project_resolver: Optional[callable] = None
+    ) -> None:
         if base_dir is None:
             base_dir = str(get_trellis_data_dir())
         self.base_dir = Path(base_dir)
+        # Callable(project_id) -> repo path. Injected by the server so this
+        # module stays independent of server-side path resolution rules.
+        self._project_resolver = project_resolver
 
     def _safe_name(self, name: str) -> str:
         """Sanitize project name for filesystem."""
@@ -107,10 +117,30 @@ class SpecManager:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def _repo_spec_candidates(self, project_id: str) -> list:
+        """Candidate spec paths inside the resolved repository.
+
+        Returns an empty list when the project cannot be resolved to a repo
+        path (e.g. only known by an ID with no on-disk repo).
+        """
+        if self._project_resolver is None:
+            return []
+        try:
+            repo_path = Path(self._project_resolver(project_id))
+        except Exception:
+            return []
+        if not repo_path.is_dir():
+            return []
+        return [repo_path / "project.md", repo_path / "docs" / "project.md"]
+
     def load_spec(self, project_id: str) -> Optional[ProjectSpec]:
-        """Load project.md for a project."""
-        # Check multiple locations
-        locations = [
+        """Load project.md for a project.
+
+        Prefers the repository's own project.md (repo root, then docs/) —
+        the file feature analysis reads. Falls back to the data directory and
+        legacy locations for unresolved projects.
+        """
+        locations = self._repo_spec_candidates(project_id) + [
             self._project_dir(project_id) / "project.md",
             self._project_dir(project_id) / "docs" / "project.md",
             Path(".trellis") / "project.md",  # Legacy
@@ -127,7 +157,17 @@ class SpecManager:
         return None
 
     def save_spec(self, project_id: str, content: str) -> Path:
-        """Save project.md for a project."""
+        """Save project.md for a project.
+
+        Writes to the repository root when the project resolves to a repo, so
+        the spec is the same file feature tools parse and version control
+        tracks. Otherwise falls back to the data directory.
+        """
+        repo_candidates = self._repo_spec_candidates(project_id)
+        if repo_candidates:
+            path = repo_candidates[0]
+            path.write_text(content, encoding="utf-8")
+            return path
         path = self._project_dir(project_id) / "project.md"
         path.write_text(content, encoding="utf-8")
         return path
