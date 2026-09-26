@@ -78,7 +78,7 @@ Flexibility — project.md is also your project document:
 1. **After your first `trellis_sync`**: check the `project_md` field. If `missing`, create `project.md` at the repo root now, before any feature-level work.
 2. **Populate it from discovery output**: derive feature names from `trellis_list_modules` / `trellis_search_code` results; derive `### Files` globs from the file paths those tools return. Start with 3-5 coarse features covering most of the codebase; refine later. `references/ubiquitous-language-template.md` has a fuller template with domain terms.
 3. **Validate**: run `trellis_feature_info(project_id, feature_name="<Name>")` for each feature. If it reports zero functions, your `### Files` globs match nothing — fix the patterns until each feature maps to its files.
-4. **Keep it current**: whenever you add, rename, or significantly change a feature, update its `project.md` section AND its Architecture note (`note_id="feature-<name>"`, tag `feature`) in the same change. After editing `project.md`, re-run the feature tool that depends on it — the file is re-read on each call, no re-sync needed.
+4. **Keep it current**: whenever you add, rename, or significantly change a feature, update its `project.md` section. That's the only file you maintain — Trellis auto-syncs the `feature-<name>` Architecture note from it on every `trellis_sync` and spec save (agent-authored notes without the auto-generated marker are never overwritten). After editing `project.md`, re-run the feature tool that depends on it — the file is re-read on each call, no re-sync needed.
 
 ## Core Principles
 
@@ -217,18 +217,9 @@ Re-analyze after implementing changes to catch unintended side effects. The code
    *When: Making architectural decisions*
    *Note: `tags` is optional, comma-separated string*
 
-4. **Update the feature's Architecture note (MANDATORY for feature work)**:
-   ```
-   trellis_create_note(
-     project_id="my-project",
-     note_id="feature-authentication",
-     title="Feature: Authentication",
-     content="# Feature: Authentication\n\n## Architecture\n- Login flow: ...\n- Token handling: @create_token\n\n## Decisions\n- [[decision-auth-refactor]]",
-     tags="feature, authentication"
-   )
-   ```
-   *When: After adding or changing any feature. If a `feature-<name>` note exists, update it; otherwise create it.*
-   *Why: Architecture notes are the feature nodes of the doc graph; stale or missing notes make feature-level analysis unreliable.*
+4. **Trellis maintains the Architecture note for you**: the `feature-<name>` note (tag `feature`) is auto-generated from your `project.md` section on every `trellis_sync` and spec save. Do NOT hand-create or hand-update it — edit `project.md` instead. Use `trellis_create_note` only for knowledge that does NOT belong in `project.md`: cross-cutting decisions, divergence logs, integration plans.
+   *When: Never mandatory. Optional notes are for rationale and plans beyond the spec.*
+   *Why: One source of truth. Hand-duplicated architecture notes drift out of sync with project.md; generated ones can't.*
 
 ### Phase 4: Verification (After Changes)
 
@@ -366,7 +357,7 @@ About to change code?
 Changed code?
   → Phase 4: Verification
     → Run: trellis_analyze_impact per changed function
-    → Update the feature's Architecture note (feature-<name>, tag: feature)
+    → Update the feature's project.md section (its note syncs itself)
 
 Reviewing someone else's code?
   → Identify changed functions from the diff yourself
@@ -537,11 +528,11 @@ Read the relevant reference file before Phase 2 (Strategy) of the workflow.
 1. **Sync once per project**: Run `trellis_sync` when you first work on a project; after that the server file-watcher keeps the graph fresh automatically
 2. **project.md is mandatory**: If sync reports it missing, create it before feature-level work
 3. **Analyze before changing**: Never modify code without running `trellis_analyze_impact`
-4. **Document decisions**: Use `trellis_create_note` to capture why decisions were made
-5. **Maintain Architecture notes**: Create/update the `feature-<name>` note (tag `feature`) whenever you change a feature
+4. **Document decisions**: Record decisions in the feature's `### Decisions` section in `project.md`; use `trellis_create_note` only for rationale and plans that don't belong in the spec
+5. **Maintain project.md, not notes**: Update the feature's `project.md` section when you change it — Trellis auto-syncs its `feature-<name>` note; never hand-edit that note
 6. **Verify after changes**: Re-analyze after implementation (the watcher has already re-indexed edited files)
 7. **Track divergence**: Note when implementation differs from specification
 8. **Use specific paths**: Reference functions by name from Trellis output
 9. **Link everything**: Use `[[Note]]` and `@Function` to connect docs and code
 10. **Read references**: Check `references/impact-analysis.md` before complex changes
-11. **Re-sync if call edges seem missing**: If impact analysis returns 0 callers unexpectedly, run `trellis_sync` to rebuild the code graph (code-graph-mcp background indexing may wipe custom call edges)
+11. **Re-sync only as a last resort**: Custom call edges wiped by re-indexing are restored automatically within a minute; if impact analysis still returns 0 callers unexpectedly after that, run `trellis_sync` for a full rebuild

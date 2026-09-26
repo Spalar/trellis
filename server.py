@@ -445,6 +445,15 @@ async def trellis_sync(
         bridge = _get_bridge(cache_key)
         health = bridge.health_check()
 
+        # Materialize/update the per-feature notes from project.md so the
+        # doc graph stays connected. Agents only maintain project.md.
+        try:
+            from src.trellis.spec_note_sync import sync_feature_notes
+
+            notes_sync = sync_feature_notes(str(bridge.project_path))
+        except Exception:
+            notes_sync = None
+
         return _dump(
             {
                 "status": "ok",
@@ -453,6 +462,7 @@ async def trellis_sync(
                 "files": health.get("files_count", 0),
                 "message": "Project synced successfully",
                 "sync_details": sync_result,
+                "feature_notes": notes_sync,
                 "project_md": _project_md_status(bridge.project_path),
             }
         )
@@ -1781,8 +1791,23 @@ async def spec_handler(request: Request):
         body = await request.json()
         content = body.get("content", "")
         path = _spec_manager.save_spec(project_id, content)
+
+        # Refresh the auto-generated feature notes so the doc graph follows
+        # the spec the agent just wrote.
+        try:
+            from src.trellis.spec_note_sync import sync_feature_notes
+
+            notes_sync = sync_feature_notes(_resolve_project_path(project_id))
+        except Exception:
+            notes_sync = None
+
         return JSONResponse(
-            {"project_id": project_id, "status": "ok", "path": str(path)}
+            {
+                "project_id": project_id,
+                "status": "ok",
+                "path": str(path),
+                "feature_notes": notes_sync,
+            }
         )
 
 
