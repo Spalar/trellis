@@ -40,7 +40,7 @@ if os.environ.get("FASTMCP_SHOW_SERVER_BANNER") is None:
 if os.environ.get("FASTMCP_LOG_LEVEL") is None:
     os.environ["FASTMCP_LOG_LEVEL"] = "ERROR"
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 # ------------------------------------------------------------------
 # Response guards (token/perf protection for coding agents)
