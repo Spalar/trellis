@@ -58,6 +58,11 @@ Open http://localhost:17317/ in your browser.
 **Views:**
 - **Code Graph**: See your codebase structure with functions, classes, and modules
 - **Doc Graph**: See your knowledge notes with wiki links and backlinks
+- **Tour**: Dependency-ordered reading list (foundational modules first) — the fastest way to onboard to an unfamiliar codebase or subtree
+- **Health**: Architecture-health snapshot — call-graph chokepoints (betweenness centrality), circular imports, and surprising cross-module couplings
+- **Spec**: View and edit `project.md`, and verify how well its features map to the synced code graph
+
+**Staying fresh:** after the first sync, a file watcher inside the code-graph server re-indexes edited files automatically — no manual re-sync needed day to day. Use **Rebuild Index** only after large external changes (huge git pulls, branch switches) or when results look stale.
 
 ### 4. Create Knowledge Notes
 

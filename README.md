@@ -28,9 +28,12 @@ The server starts on `http://localhost:17317` with:
 ## What It Does
 
 - **Code Graph**: Auto-indexes your codebase (functions, classes, calls, imports)
+- **Watch Mode**: After the first sync, a file watcher re-indexes edited files automatically — no manual re-sync day to day
 - **Impact Analysis**: "If I change this function, what breaks?"
+- **Reading Tour**: Dependency-ordered module list (foundational first) for onboarding to any codebase
+- **Project Health**: Call-graph chokepoints, circular imports, and surprising couplings at a glance
 - **Linkable Docs**: Write markdown notes with `[[Wiki Links]]` and `@CodeMentions`
-- **MCP Integration**: 17 tools for AI coding agents (Claude, Copilot, etc.)
+- **MCP Integration**: 20 tools for AI coding agents (Claude, Copilot, etc.)
 - **Web UI**: Interactive graph visualizer at `http://localhost:17317`
 
 ## Building from Source
@@ -169,6 +172,8 @@ curl http://localhost:17317/graph/my-project
 
 **Note:** Project directories should be outside the trellis repo. Trellis stores index data in `~/.trellis/projects/{name}/`, not in your project directory.
 
+**Staying fresh:** after the first sync, the server-side file watcher re-indexes edited files automatically. Re-run `trellis_sync` only after large external changes (huge git pulls, branch switches) or when results look stale.
+
 ### 2. Analyze Impact
 
 ```bash
@@ -194,7 +199,12 @@ trellis_create_note(
 
 ### 4. Explore in Browser
 
-Open `http://localhost:17317` for the interactive visualizer.
+Open `http://localhost:17317` for the interactive visualizer:
+
+- **Code Graph** / **Doc Graph** — explore code and knowledge as connected graphs
+- **Tour** — dependency-ordered reading list; the fastest way into an unfamiliar codebase
+- **Health** — architecture-health snapshot (chokepoints, circular imports, surprising couplings)
+- **Spec** — view/edit `project.md` and verify feature-to-code alignment
 
 ## Available Make Commands
 
