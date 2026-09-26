@@ -49,6 +49,9 @@ class CodeGraphBridge:
 
         # Track when call edges were last rebuilt to avoid redundant work
         self._last_call_edge_check: float = 0.0
+        # Timestamp of the last successful custom-edge heal; files edited after
+        # this point are candidates for per-file edge-loss detection.
+        self._last_call_edge_heal: float = 0.0
 
         # Register cleanup
         atexit.register(self.close)
@@ -113,43 +116,93 @@ class CodeGraphBridge:
                 cwd=str(self.project_path),  # Run in project directory
                 bufsize=1,  # Line buffered
             )
+            self._record_server_pid(self._proc.pid)
 
-    def _kill_zombie_processes(self) -> None:
-        """Kill any leftover code-graph-mcp processes for this project."""
-        import subprocess
+    def _pidfile(self) -> Path:
+        return self.code_graph_path / "trellis-server.pids"
 
+    def _record_server_pid(self, pid: int) -> None:
+        """Remember a spawned server PID so zombie cleanup only kills ours."""
         try:
-            # Try using taskkill on Windows
+            self.code_graph_path.mkdir(parents=True, exist_ok=True)
+            pids = set(self._read_server_pids())
+            pids.add(pid)
+            self._pidfile().write_text("\n".join(str(p) for p in sorted(pids)))
+        except Exception:
+            pass
+
+    def _read_server_pids(self) -> List[int]:
+        try:
+            return [
+                int(line)
+                for line in self._pidfile().read_text().splitlines()
+                if line.strip().isdigit()
+            ]
+        except Exception:
+            return []
+
+    def _pid_is_code_graph(self, pid: int) -> bool:
+        """True when PID is alive and is a code-graph-mcp process."""
+        try:
+            if os.name == "nt":
+                out = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                ).stdout
+                return "code-graph-mcp" in out
+            with open(f"/proc/{pid}/comm") as f:
+                return "code-graph-mcp" in f.read()
+        except Exception:
+            return False
+
+    def _kill_pid(self, pid: int) -> None:
+        try:
             if os.name == "nt":
                 subprocess.run(
-                    ["taskkill", "/F", "/IM", "code-graph-mcp.exe"],
+                    ["taskkill", "/F", "/PID", str(pid)],
                     capture_output=True,
                     timeout=10,
                 )
             else:
-                # Match the process name exactly (-x), not the full cmdline
-                # (-f), so unrelated processes merely mentioning the string
-                # (editors, shells) are not killed.
-                subprocess.run(
-                    ["pkill", "-9", "-x", "code-graph-mcp"],
-                    capture_output=True,
-                    timeout=10,
-                )
+                import signal
+
+                os.kill(pid, signal.SIGKILL)
         except Exception:
             pass
 
-        # Also try psutil if available
-        try:
-            import psutil
+    def _kill_zombie_processes(self) -> None:
+        """Kill leftover code-graph-mcp processes RECORDED FOR THIS PROJECT.
 
-            for proc in psutil.process_iter(["pid", "name", "cmdline"]):
-                if proc.info["name"] and "code-graph-mcp" in proc.info["name"]:
-                    try:
-                        proc.kill()
-                        proc.wait(timeout=2)
-                    except (psutil.NoSuchProcess, psutil.TimeoutExpired):
-                        pass
-        except ImportError:
+        Only PIDs this bridge (or a previous bridge for the same project, via
+        the .code-graph pidfile) spawned are considered, and each is verified
+        to still be a code-graph-mcp process before killing. Never touches
+        other projects' servers or unrelated processes.
+        """
+        import subprocess
+
+        alive: List[int] = []
+        own_pid = self._proc.pid if (self._proc and self._proc.poll() is None) else None
+        for pid in self._read_server_pids():
+            if pid == own_pid:
+                continue  # our own live child: not a zombie
+            if self._pid_is_code_graph(pid):
+                self._kill_pid(pid)
+            else:
+                alive.append(pid)
+
+        # Rewrite the pidfile: keep PIDs that are still valid code-graph-mcp
+        # processes (couldn't be killed) plus our own current child.
+        try:
+            kept = set(alive)
+            if self._proc is not None and self._proc.poll() is None:
+                kept.add(self._proc.pid)
+            if kept:
+                self._pidfile().write_text("\n".join(str(p) for p in sorted(kept)))
+            else:
+                self._pidfile().unlink(missing_ok=True)
+        except Exception:
             pass
 
         # Clean up lock files
@@ -182,11 +235,16 @@ class CodeGraphBridge:
             return True
 
     def _ensure_call_edges(self) -> None:
-        """Ensure Python call edges exist in the database.
+        """Ensure Trellis's custom call edges exist in the database.
 
-        code-graph-mcp's incremental indexing deletes files which CASCADE deletes
-        our custom 'calls' edges. This method detects missing edges and re-runs
-        the Python call indexer to restore them.
+        code-graph-mcp's re-indexing — watch mode included — deletes a file's
+        rows before re-inserting them, which CASCADE-deletes our custom
+        'calls' edges for that file. Two drift shapes are detected:
+          1. global wipe: no call edges at all (full rebuild, mass deletion)
+          2. per-file wipe: an augmented source file edited since the last
+             heal whose functions now have zero outgoing call edges
+        Healing re-runs the idempotent Python call indexer and JS augmenter;
+        they only insert what's missing.
         """
         import time
 
@@ -206,24 +264,73 @@ class CodeGraphBridge:
             conn = sqlite3.connect(str(db_path))
             cursor = conn.cursor()
 
-            # Check if we have any call edges
             cursor.execute("SELECT COUNT(*) FROM edges WHERE relation = 'calls'")
-            count = cursor.fetchone()[0]
-            conn.close()
+            drift = cursor.fetchone()[0] == 0
 
-            # If no call edges, re-run the Python call indexer
-            if count == 0:
+            if not drift:
+                # Per-file wipe: functions with no outgoing call edges at all
+                # in a file edited since the last heal. Upstream also extracts
+                # some calls natively, so "zero outgoing of any provenance" is
+                # a strong wipe signal; call-free files are excluded by the
+                # mtime gate (only edited files are considered).
+                cursor.execute(
+                    """
+                    SELECT f.path,
+                           COUNT(DISTINCT n.id),
+                           COUNT(DISTINCT e.source_id)
+                    FROM files f
+                    JOIN nodes n ON n.file_id = f.id
+                         AND n.type IN ('function', 'method')
+                    LEFT JOIN edges e
+                         ON e.source_id = n.id AND e.relation = 'calls'
+                    WHERE f.path LIKE '%.py' OR f.path LIKE '%.js'
+                       OR f.path LIKE '%.ts' OR f.path LIKE '%.jsx'
+                       OR f.path LIKE '%.tsx'
+                    GROUP BY f.path
+                    """
+                )
+                rows = cursor.fetchall()
+                conn.close()
+
+                for path, _func_nodes, sources_with_edges in rows:
+                    if sources_with_edges > 0:
+                        continue
+                    try:
+                        mtime = (self.project_path / path).stat().st_mtime
+                    except OSError:
+                        continue
+                    if mtime > self._last_call_edge_heal:
+                        drift = True
+                        break
+            else:
+                conn.close()
+
+            if drift:
                 print("[Trellis] Call edges missing, rebuilding...")
-                try:
-                    from .python_call_indexer import PythonCallGraphIndexer
-
-                    indexer = PythonCallGraphIndexer(str(self.project_path))
-                    indexer.index_calls()
-                    print("[Trellis] Call edges restored")
-                except Exception as e:
-                    print(f"[Trellis] Warning: Could not restore call edges: {e}")
+                self._heal_custom_edges()
+                self._last_call_edge_heal = time.time()
         except Exception:
             pass
+
+    def _heal_custom_edges(self) -> None:
+        """Re-run the custom-edge indexers (idempotent: restores only what's missing)."""
+        try:
+            from .python_call_indexer import PythonCallGraphIndexer
+
+            indexer = PythonCallGraphIndexer(str(self.project_path))
+            indexer.index_calls()
+            print("[Trellis] Call edges restored")
+        except Exception as e:
+            print(f"[Trellis] Warning: Could not restore call edges: {e}")
+        try:
+            from .js_graph_augmentor import JSGraphAugmentor
+
+            augmentor = JSGraphAugmentor(
+                str(self.project_path), str(self.code_graph_path / "index.db")
+            )
+            augmentor.augment()
+        except Exception as e:
+            print(f"[Trellis] Warning: Could not restore JS edges: {e}")
 
     def _call(self, tool_name: str, **arguments) -> Union[Dict, List, str]:
         """Call an MCP tool via JSON-RPC.
@@ -293,7 +400,8 @@ class CodeGraphBridge:
             thread.join(timeout)
 
             if thread.is_alive():
-                self.close()
+                # Already holding self._lock here (callers: _call/_rpc_locked).
+                self._close_locked()
                 raise RuntimeError(
                     f"Tool '{tool_name}' timed out after {timeout}s. "
                     "The code-graph-mcp process may be hung. Try restarting."
@@ -340,7 +448,12 @@ class CodeGraphBridge:
         return result
 
     def close(self) -> None:
-        """Clean up subprocess and release file locks."""
+        """Clean up subprocess and release file locks (thread-safe)."""
+        with self._lock:
+            self._close_locked()
+
+    def _close_locked(self) -> None:
+        """Terminate the subprocess. Caller must hold ``self._lock``."""
         if self._proc is not None:
             try:
                 self._proc.terminate()
@@ -873,22 +986,23 @@ class CodeGraphBridge:
         import subprocess
         import time
 
-        # Close any existing process and wait for file locks to release
-        self.close()
-        time.sleep(0.5)  # Give OS time to release file locks
+        with self._lock:
+            # Close any existing process and wait for file locks to release
+            self._close_locked()
+            time.sleep(0.5)  # Give OS time to release file locks
 
-        cmd = [str(self.binary_path)] + list(args)
-        env = os.environ.copy()
+            cmd = [str(self.binary_path)] + list(args)
+            env = os.environ.copy()
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            env=env,
-            cwd=str(self.project_path),
-            timeout=timeout,
-        )
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                env=env,
+                cwd=str(self.project_path),
+                timeout=timeout,
+            )
 
         return {
             "stdout": result.stdout,
@@ -939,6 +1053,11 @@ class CodeGraphBridge:
 
                 result["js_augmentor_error"] = str(e)
                 result["js_augmentor_traceback"] = traceback.format_exc()
+
+            # Custom edges were just (re)built — reset the per-file drift gate.
+            import time
+
+            self._last_call_edge_heal = time.time()
 
         return result
 
