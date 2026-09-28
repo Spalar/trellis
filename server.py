@@ -290,6 +290,19 @@ def _resolve_project_path(project_id: str, allow_unregistered: bool = False) -> 
                 _require_registered(resolved)
             return str(resolved)
 
+    # 0. Registry: a project_id previously synced (trellis_sync records
+    # ~/.trellis/projects/<id>/project.json). Authoritative when the id is
+    # not a repo dir the server happens to be running next to — without
+    # this, note tools read ~/.trellis/projects/<raw id>/ (empty) while
+    # sync wrote under the real repo's dir-name key. Also checked before
+    # the CWD heuristics below so a stray same-named subdir can't hijack
+    # a registered project.
+    from src.trellis.utils import list_registered_projects
+
+    registered_path = list_registered_projects().get(project_id)
+    if registered_path and Path(registered_path).exists():
+        return registered_path
+
     # Collect all candidate paths (excluding trellis internals)
     candidates = []
 

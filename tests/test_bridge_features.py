@@ -35,6 +35,10 @@ Authentication.
 
 ### Files
 - src/auth/**
+
+## Feature: Shape Drawing
+
+Drawing shapes on canvas.
 """,
         encoding="utf-8",
     )
@@ -136,3 +140,24 @@ def test_get_feature_info(bridge_project):
     assert info["functions_count"] == 3
     assert len(info["functions_sample"]) == 3
     assert len(info["hot_functions"]) <= 3
+
+
+def test_get_feature_info_multi_word_feature_finds_slug_note(bridge_project):
+    """Multi-word feature names must fall through to the slug note id.
+
+    The raw name ("Shape Drawing") is not a valid note id (spaces), so the
+    candidate loop must skip it instead of letting ValueError propagate.
+    """
+    from src.trellis.knowledge_graph import NoteGraph
+
+    bridge = CodeGraphBridge(str(bridge_project))
+    graph = NoteGraph(str(bridge_project))
+    graph.save_note(
+        "feature-shape-drawing", "Architecture note.", title="Shape Drawing"
+    )
+
+    info = bridge.get_feature_info("Shape Drawing")
+
+    assert info["found_in_spec"] is True
+    assert info["note"] is not None
+    assert info["note"]["id"] == "feature-shape-drawing"

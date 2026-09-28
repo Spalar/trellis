@@ -104,7 +104,14 @@ class CodeGraphBridge:
                 print("[Trellis] DB is locked, cleaning up zombie processes...")
                 self._kill_zombie_processes()
 
+            # The bridge always spawns deliberately for self.project_path — an
+            # explicit trellis_sync target, never an accidental throwaway cwd.
+            # Upstream's non-project guard would otherwise serve a 0-tool stub
+            # for markerless dirs (e.g. a workspace with no .git/package.json),
+            # breaking every RPC-backed tool. Force the real server; it creates
+            # .code-graph under the project root as usual.
             env = os.environ.copy()
+            env["CODE_GRAPH_FORCE_PLUGIN_MCP"] = "1"
 
             self._proc = subprocess.Popen(
                 [str(self.binary_path)],
@@ -1635,7 +1642,10 @@ class CodeGraphBridge:
             f"feature-{feature_name.lower().replace(' ', '-')}",
         ]
         for candidate in note_id_candidates:
-            note = note_graph.get_note(candidate)
+            try:
+                note = note_graph.get_note(candidate)
+            except ValueError:
+                continue  # invalid id (e.g. spaces in a multi-word feature name)
             if note:
                 break
 
