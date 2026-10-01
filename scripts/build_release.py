@@ -4,20 +4,33 @@
 This script bundles Python, all dependencies, the code-graph-mcp binary,
 and runtime assets into a single folder/zip that users can download and run.
 
-Usage:
-    python scripts/build_release.py
+The build happens entirely in `out/` (gitignored) so it never collides with
+running MCP servers that execute `dist/trellis.exe`. Deploying into `dist/`
+is a separate, explicit step.
 
-Output:
-    dist/trellis-{version}-{platform}.zip
+Usage:
+    python scripts/build_release.py          # build into out/
+    python scripts/build_release.py --deploy # build, then copy artifacts to dist/
+
+Output (in out/):
+    out/trellis.exe                              # onefile executable
+    out/trellis/                                 # onefolder collection
+    out/start-trellis.bat, out/README.txt        # launcher + readme (inside out/trellis/)
+    out/trellis-{version}-{platform}.zip         # release archive
+
+Deploy (--deploy) copies trellis.exe, the trellis/ folder, and the zip into
+dist/ — the location MCP configs run the exe from.
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import platform
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -164,24 +177,37 @@ def run_security_scan(expected_hash: str) -> None:
         raise RuntimeError("Security scan failed. Release build aborted.")
 
 
-def run_pyinstaller() -> Path:
-    """Run PyInstaller using trellis.spec."""
+def run_pyinstaller(out_dir: Path) -> Path:
+    """Run PyInstaller using trellis.spec, with all output under out_dir.
+
+    The spec uses bare relative names (name="trellis"), so PyInstaller's
+    --distpath applies as-is even when building from a spec file.
+    """
     root = Path(__file__).parent.parent
     spec_path = root / "trellis.spec"
 
     if not spec_path.exists():
         raise FileNotFoundError(f"PyInstaller spec not found: {spec_path}")
 
-    print(f"[BUILD] Running PyInstaller with {spec_path}")
+    print(f"[BUILD] Running PyInstaller with {spec_path} (distpath={out_dir})")
     result = subprocess.run(
-        [sys.executable, "-m", "PyInstaller", str(spec_path), "--clean", "--noconfirm"],
+        [
+            sys.executable,
+            "-m",
+            "PyInstaller",
+            str(spec_path),
+            "--clean",
+            "--noconfirm",
+            "--distpath",
+            str(out_dir),
+        ],
         cwd=str(root),
         check=False,
     )
     if result.returncode != 0:
         raise RuntimeError("PyInstaller build failed")
 
-    return root / "dist" / "trellis"
+    return out_dir / "trellis"
 
 
 def create_launcher(release_dir: Path) -> None:
@@ -274,14 +300,83 @@ def remove_directory_safely(path: Path) -> None:
         )
 
 
+def _with_lock_retry(description: str, operation) -> None:
+    """Run a deploy operation, retrying on Windows file locks.
+
+    A running MCP server locks dist\trellis.exe (and the onedir folder), so
+    the copy can hit PermissionError (WinError 5). Retry a few times in case
+    a client is restarting, then give up with an actionable message.
+    Never kills processes — deploying over a running server is the caller's
+    deliberate choice.
+    """
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            operation()
+            return
+        except PermissionError as e:
+            if attempt == attempts:
+                raise PermissionError(
+                    f"{description} is locked by a running process: {e}\n"
+                    "trellis.exe / code-graph-mcp are still running from dist\\.\n"
+                    "Close your MCP sessions or stop them first, e.g.:\n"
+                    "  Get-Process trellis | Stop-Process -Force\n"
+                    "Then re-run: python scripts/build_release.py --deploy"
+                ) from e
+            print(
+                f"[DEPLOY] {description} is locked "
+                f"(attempt {attempt}/{attempts}, retrying in 2s): {e}"
+            )
+            time.sleep(2)
+
+
+def deploy_to_dist(out_dir: Path, dist_dir: Path, release_name: str) -> None:
+    """Copy fresh build artifacts from out/ into dist/ (the runtime location)."""
+    artifacts = [
+        ("trellis.exe (onefile executable)", out_dir / "trellis.exe", dist_dir / "trellis.exe", "file"),
+        ("trellis/ (onefolder collection)", out_dir / "trellis", dist_dir / "trellis", "dir"),
+        (f"{release_name}.zip", out_dir / f"{release_name}.zip", dist_dir / f"{release_name}.zip", "file"),
+    ]
+
+    for description, source, target, kind in artifacts:
+        if not source.exists():
+            print(f"[DEPLOY] Skipping {description}: not present in {out_dir}")
+            continue
+
+        def _copy() -> None:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if kind == "dir":
+                if target.exists():
+                    remove_directory_safely(target)
+                shutil.copytree(source, target)
+            else:
+                shutil.copy2(source, target)
+
+        _with_lock_retry(f"{description} -> {target}", _copy)
+        print(f"[DEPLOY] {description} -> {target}")
+
+
 def main() -> None:
     """Main build entry point."""
+    parser = argparse.ArgumentParser(
+        description="Build the Trellis release into out/ "
+        "(gitignored, separate from the dist/ runtime location)."
+    )
+    parser.add_argument(
+        "--deploy",
+        action="store_true",
+        help="After a successful build, copy the artifacts into dist/ "
+        "(fails if trellis.exe is running from dist/)",
+    )
+    args = parser.parse_args()
+
     version = get_version()
     release_name = get_release_name(version)
     root = Path(__file__).parent.parent
-    dist_dir = root / "dist"
-    built_dir = dist_dir / "trellis"
-    zip_path = dist_dir / f"{release_name}.zip"
+    out_dir = root / "out"
+    built_dir = out_dir / "trellis"
+    onefile_exe = out_dir / "trellis.exe"
+    zip_path = out_dir / f"{release_name}.zip"
 
     print(f"[BUILD] Building Trellis release {release_name}")
 
@@ -292,16 +387,17 @@ def main() -> None:
     # Run security scan before release
     run_security_scan(pinned_commit)
 
-    # Clean previous PyInstaller output so we don't package stale files
+    # Clean previous build output so we don't package stale files
+    out_dir.mkdir(parents=True, exist_ok=True)
     if built_dir.exists():
         remove_directory_safely(built_dir)
-
-    # Clean any old archive with the same name
+    if onefile_exe.exists():
+        onefile_exe.unlink()
     if zip_path.exists():
         zip_path.unlink()
 
-    # Run PyInstaller into dist/trellis
-    run_pyinstaller()
+    # Run PyInstaller into out/
+    run_pyinstaller(out_dir)
 
     # Add launcher and readme
     create_launcher(built_dir)
@@ -313,7 +409,19 @@ def main() -> None:
     # Tidy up the unpackaged build folder
     remove_directory_safely(built_dir)
 
-    print(f"[BUILD] Done: {zip_path}")
+    print(f"[BUILD] Done. Artifacts built in: {out_dir}")
+    print(f"[BUILD]   - {onefile_exe}")
+    print(f"[BUILD]   - {zip_path}")
+
+    if args.deploy:
+        dist_dir = root / "dist"
+        dist_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            deploy_to_dist(out_dir, dist_dir, release_name)
+        except PermissionError as e:
+            print(f"[DEPLOY] FAILED:\n{e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"[DEPLOY] Done. Artifacts deployed to: {dist_dir}")
 
 
 if __name__ == "__main__":

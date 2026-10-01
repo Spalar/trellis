@@ -151,10 +151,23 @@ To create a downloadable zip for distribution:
 python scripts/build_release.py
 ```
 
-Output:
+The build happens entirely in `out/` (gitignored), so it never collides with
+running MCP servers that execute `dist/trellis.exe`. Output:
+
 ```
-dist/trellis-v0.2.0-windows-x86_64.zip
+out/trellis-v0.2.0-windows-amd64.zip
+out/trellis.exe            # standalone executable
 ```
+
+To also update the `dist/` runtime location (the exe MCP configs launch):
+
+```bash
+python scripts/build_release.py --deploy
+```
+
+This copies `trellis.exe`, the `trellis/` folder, and the zip from `out/` into
+`dist/`. It fails with a clear message if `dist\trellis.exe` is still running —
+close your MCP sessions first.
 
 This bundles Python, all dependencies, the `code-graph-mcp` binary, visualizer HTML, docs, and a launcher script. Users just extract and run.
 

@@ -6,6 +6,8 @@ This module exposes both HTTP routes (for the visualizer) and MCP tools
 
 from __future__ import annotations
 
+import asyncio
+import difflib
 import hmac
 import json
 import os
@@ -13,6 +15,7 @@ import re
 import secrets
 import sys
 from collections import OrderedDict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import urlsplit
@@ -128,6 +131,14 @@ Getting started:
 3. Explore with trellis_list_modules and trellis_search_code; inspect symbols with trellis_get_function; understand features with trellis_feature_info.
 4. Before modifying any function, run trellis_analyze_impact on it. The graph reflects your edits automatically — just re-analyze. Run trellis_sync again only after large external changes (big pulls, branch switches) or if results look stale.
 5. Document decisions and feature architecture with trellis_create_note (wiki links [[Note]], code mentions @function).
+
+Long-running calls — read before running trellis_sync:
+- Tool calls run ASYNC on the server: a long call won't block other projects' trellis calls, but each call returns ONLY when its work is done (not fire-and-forget), and calls on the SAME project queue one at a time.
+- The FIRST trellis_sync of a project rebuilds the whole index and takes SEVERAL MINUTES (5-15 min for large repos). That is normal, not a hang.
+- HOW TO RUN IT: invoke trellis_sync in BACKGROUND mode and keep working on other things — do not sit blocked on this call and do not let it stall the rest of your task. Use your harness's background/async tool-call option (e.g. run_in_background=true); the harness sends a system notification when the result is ready, and you pick it up then. NEVER poll in a loop, interrupt, cancel, or re-issue the call while it is pending — it is still running server-side, and duplicates queue behind it and only make that project slower (MCP error -32001). Note: not every harness HAS a background/async tool-call option — if yours doesn't (or its timeout kills the call), run the sync out-of-band instead: `trellis.exe sync <repo_path> --project-id <id>` (the same exe your MCP config launches) in a background shell — it prints progress and exits when done; then continue with trellis_list_modules.
+- To check whether a sync is still running, finished, or failed, call trellis_sync_status(project_id=...) — it reports running/completed/failed plus index size, for both MCP tool syncs and headless CLI syncs. While it says running, keep waiting; do not re-issue trellis_sync.
+- While a sync runs, other calls on the same project may be slow or time out; calls on other projects keep working.
+- Analysis tools on very large projects (trellis_get_graph, trellis_tour, trellis_project_health) can also take a minute or more — same rules: background mode + notification.
 
 The full skill document — complete workflow, project.md template, and tool reference — is available as the MCP resource "trellis://skill". Fetch it if the trellis-mcp skill is not installed in your agent.
 """
@@ -248,6 +259,37 @@ _spec_manager = SpecManager(
 _BRIDGE_CACHE_MAX = 8
 _bridge_cache: "OrderedDict[str, CodeGraphBridge]" = OrderedDict()
 
+# In-memory sync job state, keyed by sanitized project_id (or the cache_key
+# when project_id is empty). Authoritative within this process; mirrored to
+# disk (sync_status.json) so headless CLI syncs and server restarts are visible
+# too — trellis_sync_status prefers this and falls back to the file.
+_sync_jobs: Dict[str, dict] = {}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _new_sync_job(source: str) -> dict:
+    """Fresh "running" sync record (see write_sync_status for the shape)."""
+    return {
+        "state": "running",
+        "started_at": _now_iso(),
+        "finished_at": None,
+        "detail": "",
+        "nodes": None,
+        "files": None,
+        "source": source,
+    }
+
+
+def _set_sync_job(job_key: str, job: dict) -> None:
+    """Record sync state in memory and on disk (best-effort, never raises)."""
+    _sync_jobs[job_key] = job
+    from src.trellis.utils import write_sync_status
+
+    write_sync_status(job_key, job)
+
 
 def _require_registered(resolved: Path) -> None:
     """Reject absolute paths that are not registered projects.
@@ -303,24 +345,28 @@ def _resolve_project_path(project_id: str, allow_unregistered: bool = False) -> 
     if registered_path and Path(registered_path).exists():
         return registered_path
 
-    # Collect all candidate paths (excluding trellis internals)
+    # Collect all candidate paths (excluding trellis internals). In frozen
+    # (PyInstaller) mode the cwd/sibling/parent heuristics are meaningless —
+    # Path(__file__).parent is a temp _MEIxxx dir — so only the registry and
+    # absolute-path handling apply.
     candidates = []
 
-    # 1. Relative to current directory
-    if path.exists():
-        resolved = path.resolve()
-        if not _is_inside_trellis(resolved, trellis_root):
-            candidates.append(resolved)
+    if not getattr(sys, "frozen", False):
+        # 1. Relative to current directory
+        if path.exists():
+            resolved = path.resolve()
+            if not _is_inside_trellis(resolved, trellis_root):
+                candidates.append(resolved)
 
-    # 2. Sibling of trellis root (common pattern: repos/ProjectName)
-    sibling = trellis_root.parent / project_id
-    if sibling.exists() and sibling.resolve() not in candidates:
-        candidates.append(sibling.resolve())
+        # 2. Sibling of trellis root (common pattern: repos/ProjectName)
+        sibling = trellis_root.parent / project_id
+        if sibling.exists() and sibling.resolve() not in candidates:
+            candidates.append(sibling.resolve())
 
-    # 3. Parent of current directory
-    parent_sibling = Path.cwd().parent / project_id
-    if parent_sibling.exists() and parent_sibling.resolve() not in candidates:
-        candidates.append(parent_sibling.resolve())
+        # 3. Parent of current directory
+        parent_sibling = Path.cwd().parent / project_id
+        if parent_sibling.exists() and parent_sibling.resolve() not in candidates:
+            candidates.append(parent_sibling.resolve())
 
     # 4. Check if user provided absolute path that doesn't exist yet
     if path.is_absolute():
@@ -329,7 +375,22 @@ def _resolve_project_path(project_id: str, allow_unregistered: bool = False) -> 
         return str(path)
 
     if not candidates:
-        return project_id  # Fallback
+        # Unknown id: refuse to fall back to the raw id — CodeGraphBridge
+        # would resolve it against the server CWD and create a phantom
+        # <cwd>/<id>/.code-graph directory plus a garbage registry entry.
+        hint = (
+            f'Register it first: trellis_sync(project_id="{project_id}", '
+            'repo_path="<repo root>")'
+        )
+        close = difflib.get_close_matches(
+            project_id, list_registered_projects().keys(), n=3, cutoff=0.5
+        )
+        if close:
+            raise ValueError(
+                f"Unknown project '{project_id}'. Did you mean: "
+                f"{', '.join(close)}? {hint}"
+            )
+        raise ValueError(f"Unknown project '{project_id}'. {hint}")
 
     # Prefer the candidate with a .git directory
     for candidate in candidates:
@@ -382,6 +443,8 @@ _SKILL_FALLBACK = """\
 4. Before changing code: trellis_analyze_impact. The graph re-indexes edits automatically (file watcher) — just re-analyze; re-run trellis_sync only after large pulls or if results look stale.
 5. Document with trellis_create_note ([[wiki links]] and @code mentions).
 
+Long-running calls: calls run ASYNC on the server (a long call won't block other projects), but each returns only when its work finishes — never fire-and-forget. The FIRST trellis_sync of a project takes SEVERAL MINUTES (5-15 min for large repos) — that is normal. Run it in BACKGROUND mode (your harness's run_in_background/async option), keep working on other things, and act on the system notification when the result arrives. Never poll in a loop, interrupt, cancel, or re-issue a pending call — it is still running server-side, and duplicates only make that project's calls slower (MCP error -32001). Not every harness has a background mode: if yours doesn't, run `trellis.exe sync <repo_path> --project-id <id>` in a background shell instead. To check whether a sync is still running, finished, or failed, call trellis_sync_status(project_id=...) — it works for both MCP and CLI syncs; while it says running, keep waiting. Calls on the same project queue one at a time.
+
 Install the trellis-mcp skill (skills/ folder in the Trellis distribution) for the full workflow.
 """
 
@@ -428,12 +491,39 @@ async def trellis_sync(
     stays fresh by itself: the server watches the project and re-indexes
     edited files automatically. Call again only after large external changes
     (big git pulls, branch switches) or when tool results look stale.
+
+    Duration: the initial sync of a large repo takes SEVERAL MINUTES
+    (5-15 min for a big codebase) — this is normal, not a hang. This call
+    runs ASYNC on the server: it won't block other projects' trellis calls,
+    it returns ONLY when the sync finishes (it is not fire-and-forget), and
+    other calls on the same project queue behind it.
+
+    How to run it: invoke this tool in BACKGROUND mode (your harness's
+    run_in_background / async tool-call option) and continue other work —
+    do not sit blocked on it; the harness sends a system notification when
+    the result is ready. NEVER poll in a loop, interrupt, cancel, or
+    re-issue the call while it is pending: it is still running server-side,
+    and a duplicate sync queues behind it and only makes that project's
+    calls slower.
+
+    If your client's timeout is shorter than the sync, run the trellis
+    executable directly in a background shell instead:
+    `trellis.exe sync <repo_path> --project-id <id>` (same exe your MCP
+    config uses) — it prints progress and exits when done; then continue
+    with trellis_list_modules.
+
+    To check progress — while waiting, after a timeout, or for a headless
+    CLI sync — call trellis_sync_status(project_id=...): it reports
+    running/completed/failed plus index size for both MCP and CLI syncs.
+    While it says running, keep waiting; do not re-issue this tool.
     """
+    cache_key = repo_path or project_id
+    job_key = project_id or cache_key
+    job: dict = {}
     try:
         # Clear bridge cache for this project to avoid DB lock conflicts
-        cache_key = repo_path or project_id
         if cache_key in _bridge_cache:
-            _bridge_cache[cache_key].close()
+            await asyncio.to_thread(_bridge_cache[cache_key].close)
             del _bridge_cache[cache_key]
 
         # trellis_sync is the registration path: it may point at a repo that
@@ -441,29 +531,47 @@ async def trellis_sync(
         from src.trellis import CodeGraphBridge
 
         resolved = _resolve_project_path(cache_key, allow_unregistered=True)
+
+        # Register the agent's project_id -> resolved repo so later calls
+        # with the same id resolve via the registry instead of falling into
+        # the unknown-id error.
+        if project_id:
+            from src.trellis.utils import register_project
+
+            register_project(project_id, resolved)
+
+        job = _new_sync_job("mcp")
+        _set_sync_job(job_key, job)
+
         bridge = CodeGraphBridge(resolved)
 
         # Trigger actual indexing
         if incremental:
-            sync_result = bridge.incremental_sync()
+            sync_result = await asyncio.to_thread(bridge.incremental_sync)
         else:
-            sync_result = bridge.sync_project()
+            sync_result = await asyncio.to_thread(bridge.sync_project)
 
         # After sync, we need a fresh bridge since the old one closed its process
         if cache_key in _bridge_cache:
-            _bridge_cache[cache_key].close()
+            await asyncio.to_thread(_bridge_cache[cache_key].close)
             del _bridge_cache[cache_key]
 
         # Get fresh bridge for health check
         bridge = _get_bridge(cache_key)
-        health = bridge.health_check()
+        health = await asyncio.to_thread(bridge.health_check)
+
+        job["state"] = "completed"
+        job["finished_at"] = _now_iso()
+        job["nodes"] = health.get("nodes_count", 0)
+        job["files"] = health.get("files_count", 0)
+        _set_sync_job(job_key, job)
 
         # Materialize/update the per-feature notes from project.md so the
         # doc graph stays connected. Agents only maintain project.md.
         try:
             from src.trellis.spec_note_sync import sync_feature_notes
 
-            notes_sync = sync_feature_notes(str(bridge.project_path))
+            notes_sync = await asyncio.to_thread(sync_feature_notes, str(bridge.project_path))
         except Exception:
             notes_sync = None
 
@@ -479,6 +587,141 @@ async def trellis_sync(
                 "project_md": _project_md_status(bridge.project_path),
             }
         )
+    except Exception as e:
+        if job.get("state") == "running":
+            job["state"] = "failed"
+            job["finished_at"] = _now_iso()
+            job["detail"] = str(e)
+            _set_sync_job(job_key, job)
+        return _dump({"error": str(e)})
+    finally:
+        # A client timeout cancels the coroutine (CancelledError is not caught
+        # above): the to_thread sync keeps running in its worker thread, but
+        # from the handler's perspective the job is dead. Record that so
+        # trellis_sync_status doesn't report a zombie "running" forever —
+        # an approximation, since the thread may still finish the index fine.
+        if (
+            job.get("state") == "running"
+            and _sync_jobs.get(job_key) is job
+        ):
+            job["state"] = "failed"
+            job["finished_at"] = _now_iso()
+            job["detail"] = "sync handler cancelled (client timeout or interrupt)"
+            _set_sync_job(job_key, job)
+
+
+def _sync_guidance(job: dict, index_exists: bool) -> str:
+    """One-sentence next-step hint based on sync state and index presence."""
+    if job and job.get("state") == "running":
+        started = _parse_iso(job.get("started_at"))
+        secs = (
+            int((datetime.now(timezone.utc) - started).total_seconds())
+            if started
+            else 0
+        )
+        return (
+            f"Sync is RUNNING (started {secs}s ago). Keep waiting — check this "
+            "tool again; do NOT re-issue trellis_sync."
+        )
+    if job and job.get("state") == "failed":
+        return (
+            f"Last sync FAILED: {job.get('detail', '')}. "
+            "Fix and re-run trellis_sync."
+        )
+    if job and job.get("state") == "completed":
+        return "Index ready — proceed with trellis_list_modules etc."
+    if not job and not index_exists:
+        return (
+            "No index yet — run trellis_sync (background mode) or "
+            "trellis.exe sync <repo> --project-id <id>."
+        )
+    return "Index exists and no sync is running."
+
+
+def _parse_iso(value) -> "datetime | None":
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _project_sync_summary(project_id: str) -> dict:
+    """Per-project sync status summary. Blocking — call via asyncio.to_thread."""
+    from src.trellis.utils import list_registered_projects, read_sync_status
+
+    try:
+        repo = _resolve_project_path(project_id)
+    except ValueError as e:
+        return {"error": str(e)}
+
+    registered = list_registered_projects().get(project_id)
+    index_exists = (Path(repo) / ".code-graph" / "index.db").exists()
+
+    nodes = None
+    files = None
+    if index_exists:
+        try:
+            bridge = _get_bridge(project_id)
+            health = bridge.health_check()
+            nodes = health.get("nodes_count")
+            files = health.get("files_count")
+        except Exception:
+            # Index present but unreadable right now (e.g. mid-write) — report
+            # counts as null rather than failing the whole status call.
+            nodes = None
+            files = None
+
+    job = _sync_jobs.get(project_id) or read_sync_status(project_id)
+
+    return {
+        "project_id": project_id,
+        "repo_path": repo,
+        "registered": registered is not None,
+        "index_exists": index_exists,
+        "nodes": nodes,
+        "files": files,
+        "sync": job,
+        "guidance": _sync_guidance(job, index_exists),
+    }
+
+
+@mcp.tool()
+async def trellis_sync_status(
+    project_id: str = "",
+) -> str:
+    """Check whether a sync is still running, finished, or failed.
+
+    THIS is the way to check sync progress — including for syncs started via
+    the headless CLI (`trellis.exe sync <repo> --project-id <id>`), which run
+    in a separate process but still report here. If trellis_sync timed out
+    client-side, call this instead of re-issuing the sync: while it says
+    "running", keep waiting and check again; when it says "completed", the
+    index is ready.
+
+    Returns the registered repo path, whether the index exists, node/file
+    counts (null when the index is missing or temporarily unreadable), the
+    last known sync state (running/completed/failed with timestamps and, for
+    failures, the error), and a one-sentence guidance field. With no
+    project_id, returns a compact summary for every registered project.
+
+    Example:
+      trellis_sync_status(project_id='my-project')
+    """
+    try:
+        if project_id:
+            summary = await asyncio.to_thread(_project_sync_summary, project_id)
+            return _dump(summary)
+
+        from src.trellis.utils import list_registered_projects
+
+        registered = await asyncio.to_thread(list_registered_projects)
+        projects = []
+        for pid in registered:
+            summary = await asyncio.to_thread(_project_sync_summary, pid)
+            summary.pop("repo_path", None)
+            summary.pop("guidance", None)
+            projects.append(summary)
+        return _dump({"projects": projects})
     except Exception as e:
         return _dump({"error": str(e)})
 
@@ -599,7 +842,7 @@ async def trellis_analyze_impact(
         bridge = _get_bridge(project_id)
 
         # Get feature impact report
-        report = bridge.get_feature_impact(function_path, depth=3)
+        report = await asyncio.to_thread(bridge.get_feature_impact, function_path, depth=3)
 
         # Format for MCP
         result = {
@@ -648,7 +891,7 @@ async def trellis_get_function(
             symbol = function_path.split(":")[-1]
 
         # Try direct lookup first
-        node = bridge.get_ast_node(symbol)
+        node = await asyncio.to_thread(bridge.get_ast_node, symbol)
 
         # If not found, try searching by name in SQLite
         if not node or (
@@ -720,7 +963,7 @@ async def trellis_search_code(
     """
     try:
         bridge = _get_bridge(project_id)
-        results = bridge.search(query, limit=limit)
+        results = await asyncio.to_thread(bridge.search, query, limit=limit)
         return _dump({"results": results})
     except Exception as e:
         return _dump({"error": str(e)})
@@ -749,7 +992,8 @@ async def trellis_ast_search(
     """
     try:
         bridge = _get_bridge(project_id)
-        results = bridge.ast_search(
+        results = await asyncio.to_thread(
+            bridge.ast_search,
             query=query or None,
             node_type=node_type or None,
             returns=returns or None,
@@ -759,6 +1003,40 @@ async def trellis_ast_search(
         return _dump({"results": results})
     except Exception as e:
         return _dump({"error": str(e)})
+
+
+def _module_entry(m: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize a project_map module entry to {path, files, symbols, language}.
+
+    The Rust MCP `project_map` tool reports per-kind counts (functions,
+    classes, interfaces_traits, constants, other) and a `languages` list,
+    while the CLI fallback parser reports a flat `symbols` count and a
+    `language` string. Accept both.
+    """
+    symbols = m.get("symbols")
+    if symbols is None:
+        symbols = sum(
+            m.get(k, 0) or 0
+            for k in (
+                "functions",
+                "classes",
+                "interfaces_traits",
+                "constants",
+                "other",
+            )
+        )
+    languages = m.get("languages")
+    language = (
+        ", ".join(str(lang) for lang in languages)
+        if languages
+        else m.get("language", "")
+    )
+    return {
+        "path": m.get("path", "unknown"),
+        "files": m.get("files", 0),
+        "symbols": symbols,
+        "language": language,
+    }
 
 
 @mcp.tool()
@@ -771,21 +1049,9 @@ async def trellis_list_modules(
     """
     try:
         bridge = _get_bridge(project_id)
-        pmap = bridge.project_map()
+        pmap = await asyncio.to_thread(bridge.project_map)
         modules = pmap.get("modules", [])
-        return _dump(
-            {
-                "modules": [
-                    {
-                        "path": m.get("path", "unknown"),
-                        "files": m.get("files", 0),
-                        "symbols": m.get("symbols", 0),
-                        "language": m.get("language", ""),
-                    }
-                    for m in modules
-                ]
-            }
-        )
+        return _dump({"modules": [_module_entry(m) for m in modules]})
     except Exception as e:
         return _dump({"error": str(e)})
 
@@ -804,7 +1070,7 @@ async def trellis_feature_info(
     """
     try:
         bridge = _get_bridge(project_id)
-        info = bridge.get_feature_info(feature_name)
+        info = await asyncio.to_thread(bridge.get_feature_info, feature_name)
 
         # Cap note payload so long architecture notes don't flood the context
         note = info.get("note")
@@ -849,7 +1115,7 @@ async def trellis_trace_path(
         # Resolve feature names to file patterns via project.md
         from src.trellis.feature_impact import ProjectContextParser
 
-        context = ProjectContextParser(str(bridge.project_path))
+        context = await asyncio.to_thread(ProjectContextParser, str(bridge.project_path))
         from_patterns = [f"%{from_feature}%"]
         to_patterns = [f"%{to_feature}%"]
 
@@ -988,7 +1254,7 @@ async def trellis_get_graph(
     """
     try:
         bridge = _get_bridge(project_id)
-        graph = bridge.get_graph_for_visualizer(max_nodes=max_nodes)
+        graph = await asyncio.to_thread(bridge.get_graph_for_visualizer, max_nodes=max_nodes)
         return _dump(graph)
     except Exception as e:
         return _dump({"error": str(e)})
@@ -1014,7 +1280,7 @@ async def trellis_tour(
     """
     try:
         bridge = _get_bridge(project_id)
-        result = bridge.tour(path or None)
+        result = await asyncio.to_thread(bridge.tour, path or None)
         return _dump(result)
     except Exception as e:
         return _dump({"error": str(e)})
@@ -1038,7 +1304,7 @@ async def trellis_trace_http_route(
     """
     try:
         bridge = _get_bridge(project_id)
-        result = bridge.trace_http_route(route_path, depth=depth)
+        result = await asyncio.to_thread(bridge.trace_http_route, route_path, depth=depth)
         return _dump(result)
     except Exception as e:
         return _dump({"error": str(e)})
@@ -1063,7 +1329,7 @@ async def trellis_project_health(
     """
     try:
         bridge = _get_bridge(project_id)
-        return _dump(bridge.project_health(limit))
+        return _dump(await asyncio.to_thread(bridge.project_health, limit))
     except Exception as e:
         return _dump({"error": str(e)})
 
@@ -1359,7 +1625,7 @@ async def trellis_analyze_diff(
             analyzed_symbols.add(symbol)
 
             try:
-                report = bridge.get_feature_impact(symbol, depth=2)
+                report = await asyncio.to_thread(bridge.get_feature_impact, symbol, depth=2)
                 impact_results.append(
                     {
                         "symbol": symbol,
@@ -1438,7 +1704,7 @@ async def trellis_get_boundary_map(
     """Get module boundary map (modules and cross-module dependencies)."""
     try:
         bridge = _get_bridge(project_id)
-        pmap = bridge.project_map()
+        pmap = await asyncio.to_thread(bridge.project_map)
         modules = pmap.get("modules", [])
         deps = pmap.get("dependencies", [])
         return _dump(
@@ -1472,10 +1738,12 @@ async def trellis_create_note(
         from src.trellis.knowledge_graph import NoteGraph
 
         resolved = _resolve_project_path(project_id)
-        graph = NoteGraph(resolved)
+        graph = await asyncio.to_thread(NoteGraph, resolved)
 
         tag_list = [t.strip() for t in tags.split(",")] if tags else []
-        note = graph.save_note(note_id, content, title=title, tags=tag_list)
+        note = await asyncio.to_thread(
+            graph.save_note, note_id, content, title=title, tags=tag_list
+        )
 
         return _dump(
             {
@@ -1500,8 +1768,8 @@ async def trellis_get_note(
         from src.trellis.knowledge_graph import NoteGraph
 
         resolved = _resolve_project_path(project_id)
-        graph = NoteGraph(resolved)
-        note = graph.get_note(note_id)
+        graph = await asyncio.to_thread(NoteGraph, resolved)
+        note = await asyncio.to_thread(graph.get_note, note_id)
 
         if not note:
             return _dump({"error": f"Note '{note_id}' not found"})
@@ -1514,7 +1782,7 @@ async def trellis_get_note(
                 "tags": note.tags,
                 "links": note.links,
                 "mentions": note.mentions,
-                "backlinks": graph.get_backlinks(note_id),
+                "backlinks": await asyncio.to_thread(graph.get_backlinks, note_id),
                 "created": note.created_at,
                 "updated": note.updated_at,
             }
@@ -1533,8 +1801,8 @@ async def trellis_search_notes(
         from src.trellis.knowledge_graph import NoteGraph
 
         resolved = _resolve_project_path(project_id)
-        graph = NoteGraph(resolved)
-        results = graph.search_notes(query)
+        graph = await asyncio.to_thread(NoteGraph, resolved)
+        results = await asyncio.to_thread(graph.search_notes, query)
 
         return _dump(
             {
@@ -1566,8 +1834,8 @@ async def trellis_delete_note(
         from src.trellis.knowledge_graph import NoteGraph
 
         resolved = _resolve_project_path(project_id)
-        graph = NoteGraph(resolved)
-        success = graph.delete_note(note_id)
+        graph = await asyncio.to_thread(NoteGraph, resolved)
+        success = await asyncio.to_thread(graph.delete_note, note_id)
 
         return _dump(
             {
@@ -1601,8 +1869,8 @@ async def trellis_knowledge_graph(
         from src.trellis.knowledge_graph import NoteGraph
 
         resolved = _resolve_project_path(project_id)
-        graph = NoteGraph(resolved)
-        data = graph.build_graph(include_code=include_code)
+        graph = await asyncio.to_thread(NoteGraph, resolved)
+        data = await asyncio.to_thread(graph.build_graph, include_code=include_code)
 
         # Truncate note contents in graph nodes; full text via trellis_get_note
         for node in data.get("nodes", []):
@@ -1663,7 +1931,7 @@ async def graph_get(request: Request):
     project_id = request.path_params["project_id"]
     try:
         bridge = _get_bridge(project_id)
-        graph = bridge.get_graph_for_visualizer()
+        graph = await asyncio.to_thread(bridge.get_graph_for_visualizer)
         return JSONResponse(graph)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -1674,8 +1942,6 @@ async def graph_sync(request: Request):
     """Full index rebuild. Heavy — edits are otherwise indexed automatically
     by the server-side file watcher (armed by the bridge on every spawn), so
     this is only needed after large external changes or when stale."""
-    import asyncio
-
     project_id = request.path_params["project_id"]
     try:
         bridge = _get_bridge(project_id)
@@ -1697,7 +1963,7 @@ async def graph_status(request: Request):
     project_id = request.path_params["project_id"]
     try:
         bridge = _get_bridge(project_id)
-        return JSONResponse(bridge.health_check())
+        return JSONResponse(await asyncio.to_thread(bridge.health_check()))
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -1705,8 +1971,6 @@ async def graph_status(request: Request):
 @mcp.custom_route("/graph/{project_id}/tour", methods=["GET"])
 async def graph_tour(request: Request):
     """Dependency-ordered reading tour (foundational -> entry-point modules)."""
-    import asyncio
-
     project_id = request.path_params["project_id"]
     path = request.query_params.get("path") or None
     try:
@@ -1720,8 +1984,6 @@ async def graph_tour(request: Request):
 @mcp.custom_route("/graph/{project_id}/health", methods=["GET"])
 async def graph_health(request: Request):
     """Architecture-health snapshot (chokepoints, import cycles, surprising edges)."""
-    import asyncio
-
     project_id = request.path_params["project_id"]
     limit = request.query_params.get("limit")
     try:
@@ -1741,7 +2003,7 @@ async def graph_impact(request: Request):
     symbol = request.path_params["symbol"]
     try:
         bridge = _get_bridge(project_id)
-        graph = bridge.get_impact_graph(symbol)
+        graph = await asyncio.to_thread(bridge.get_impact_graph, symbol)
         return JSONResponse(graph)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -1754,7 +2016,7 @@ async def feature_impact(request: Request):
     symbol = request.path_params["symbol"]
     try:
         bridge = _get_bridge(project_id)
-        report = bridge.get_feature_impact(symbol)
+        report = await asyncio.to_thread(bridge.get_feature_impact, symbol)
         return JSONResponse(report)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -1767,7 +2029,7 @@ async def feature_pointers(request: Request):
     symbol = request.path_params["symbol"]
     try:
         bridge = _get_bridge(project_id)
-        pointers = bridge.get_development_pointers(symbol)
+        pointers = await asyncio.to_thread(bridge.get_development_pointers, symbol)
         return JSONResponse({"pointers": pointers})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -1779,10 +2041,10 @@ async def spec_handler(request: Request):
     project_id = request.path_params["project_id"]
 
     if request.method == "GET":
-        spec = _spec_manager.load_spec(project_id)
+        spec = await asyncio.to_thread(_spec_manager.load_spec, project_id)
         repo_spec_path = str(Path(_resolve_project_path(project_id)) / "project.md")
         if spec is None:
-            template = _spec_manager.create_template(project_id)
+            template = await asyncio.to_thread(_spec_manager.create_template, project_id)
             return JSONResponse(
                 {
                     "project_id": project_id,
@@ -1803,14 +2065,16 @@ async def spec_handler(request: Request):
     else:  # POST
         body = await request.json()
         content = body.get("content", "")
-        path = _spec_manager.save_spec(project_id, content)
+        path = await asyncio.to_thread(_spec_manager.save_spec, project_id, content)
 
         # Refresh the auto-generated feature notes so the doc graph follows
         # the spec the agent just wrote.
         try:
             from src.trellis.spec_note_sync import sync_feature_notes
 
-            notes_sync = sync_feature_notes(_resolve_project_path(project_id))
+            notes_sync = await asyncio.to_thread(
+                sync_feature_notes, _resolve_project_path(project_id)
+            )
         except Exception:
             notes_sync = None
 
@@ -1839,7 +2103,7 @@ async def spec_alignment(request: Request):
         from src.trellis.utils import resolve_code_graph_db
 
         bridge = _get_bridge(project_id)
-        parser = ProjectContextParser(str(bridge.project_path))
+        parser = await asyncio.to_thread(ProjectContextParser, str(bridge.project_path))
         features = parser.get_all_features()
 
         # All indexed source files from the code graph DB
@@ -1867,7 +2131,7 @@ async def spec_alignment(request: Request):
         for name, feature in features.items():
             matched = match_files(feature.file_patterns)
             covered_files.update(matched)
-            functions = bridge.get_feature_functions(name)
+            functions = await asyncio.to_thread(bridge.get_feature_functions, name)
             issues = []
             if not feature.file_patterns:
                 issues.append("no file patterns - add a '### Files' section")
@@ -1923,8 +2187,8 @@ async def knowledge_graph_get(request: Request):
         from src.trellis.knowledge_graph import NoteGraph
 
         resolved = _resolve_project_path(project_id)
-        graph = NoteGraph(resolved)
-        data = graph.build_graph(include_code=True)
+        graph = await asyncio.to_thread(NoteGraph, resolved)
+        data = await asyncio.to_thread(graph.build_graph, include_code=True)
         return JSONResponse(data)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -1940,10 +2204,10 @@ async def note_handler(request: Request):
         from src.trellis.knowledge_graph import NoteGraph
 
         resolved = _resolve_project_path(project_id)
-        graph = NoteGraph(resolved)
+        graph = await asyncio.to_thread(NoteGraph, resolved)
 
         if request.method == "GET":
-            note = graph.get_note(note_id)
+            note = await asyncio.to_thread(graph.get_note, note_id)
             if not note:
                 return JSONResponse(
                     {"error": f"Note '{note_id}' not found"}, status_code=404
@@ -1956,7 +2220,7 @@ async def note_handler(request: Request):
                     "tags": note.tags,
                     "links": note.links,
                     "mentions": note.mentions,
-                    "backlinks": graph.get_backlinks(note_id),
+                    "backlinks": await asyncio.to_thread(graph.get_backlinks, note_id),
                 }
             )
         elif request.method == "POST":
@@ -1964,12 +2228,14 @@ async def note_handler(request: Request):
             content = body.get("content", "")
             title = body.get("title", note_id)
             tags = body.get("tags", [])
-            note = graph.save_note(note_id, content, title=title, tags=tags)
+            note = await asyncio.to_thread(
+                graph.save_note, note_id, content, title=title, tags=tags
+            )
             return JSONResponse(
                 {"status": "ok", "note_id": note.id, "title": note.title}
             )
         elif request.method == "DELETE":
-            success = graph.delete_note(note_id)
+            success = await asyncio.to_thread(graph.delete_note, note_id)
             if not success:
                 return JSONResponse(
                     {"error": f"Note '{note_id}' not found"}, status_code=404
@@ -1991,7 +2257,7 @@ async def notes_list(request: Request):
         from src.trellis.knowledge_graph import NoteGraph
 
         resolved = _resolve_project_path(project_id)
-        graph = NoteGraph(resolved)
+        graph = await asyncio.to_thread(NoteGraph, resolved)
         notes = [
             {
                 "id": n.id,
@@ -2013,7 +2279,7 @@ async def feature_context(request: Request):
     symbol = request.path_params["symbol"]
     try:
         bridge = _get_bridge(project_id)
-        context = bridge.get_feature_context(symbol)
+        context = await asyncio.to_thread(bridge.get_feature_context, symbol)
         if context:
             return JSONResponse(context)
         return JSONResponse({"error": "No feature context found"}, status_code=404)
@@ -2028,7 +2294,7 @@ async def feature_divergence(request: Request):
     symbol = request.path_params["symbol"]
     try:
         bridge = _get_bridge(project_id)
-        warnings = bridge.check_feature_divergence(symbol)
+        warnings = await asyncio.to_thread(bridge.check_feature_divergence, symbol)
         return JSONResponse(
             {
                 "symbol": symbol,
@@ -2088,7 +2354,108 @@ async def list_projects(request: Request):
 # Main
 # ------------------------------------------------------------------
 
+
+def _cli_sync(argv: List[str]) -> int:
+    """Headless `trellis sync` subcommand: index a repo and exit.
+
+    Lets agents sync a project in a background shell when the MCP client's
+    tool timeout is shorter than the sync (first index takes 5-15 min).
+    Prints a heartbeat every 30s and a JSON summary at the end.
+    """
+    import argparse
+    import threading
+
+    parser = argparse.ArgumentParser(
+        prog="trellis sync",
+        description="Index a repository into the code graph and exit.",
+    )
+    parser.add_argument("repo_path", help="Path to the repository root")
+    parser.add_argument(
+        "--project-id", default="", help="Project id to register for this repo"
+    )
+    parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="Incremental re-index instead of a full rebuild",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        from src.trellis.launcher import setup_environment
+
+        setup_environment()
+    except ImportError:
+        pass
+
+    repo = Path(args.repo_path).resolve()
+    if not repo.is_dir():
+        print(f"error: '{args.repo_path}' is not a directory", file=sys.stderr)
+        return 2
+
+    from src.trellis import CodeGraphBridge
+    from src.trellis.utils import register_project, write_sync_status
+
+    register_project(args.project_id, repo)
+    job = _new_sync_job("cli")
+    write_sync_status(args.project_id or repo.name, job)
+    bridge = CodeGraphBridge(str(repo))
+    print(f"Indexing {repo} ...", flush=True)
+
+    done = threading.Event()
+
+    def _heartbeat() -> None:
+        while not done.wait(30):
+            print("still indexing...", flush=True)
+
+    threading.Thread(target=_heartbeat, daemon=True).start()
+
+    try:
+        if args.incremental:
+            sync_result = bridge.incremental_sync()
+        else:
+            sync_result = bridge.sync_project()
+        health = bridge.health_check()
+    except Exception as e:
+        job["state"] = "failed"
+        job["finished_at"] = _now_iso()
+        job["detail"] = str(e)
+        write_sync_status(args.project_id or repo.name, job)
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    finally:
+        done.set()
+
+    success = (
+        sync_result.get("success", False)
+        if isinstance(sync_result, dict)
+        else bool(sync_result)
+    )
+    job["state"] = "completed" if success else "failed"
+    job["finished_at"] = _now_iso()
+    job["detail"] = "" if success else "sync exited without success"
+    job["nodes"] = health.get("nodes_count", 0)
+    job["files"] = health.get("files_count", 0)
+    write_sync_status(args.project_id or repo.name, job)
+    print(
+        json.dumps(
+            {
+                "success": success,
+                "nodes": job["nodes"],
+                "files": job["files"],
+            }
+        ),
+        flush=True,
+    )
+    return 0 if success else 1
+
+
 if __name__ == "__main__":
+    # Headless sync CLI: `trellis.exe sync <repo_path> [--project-id <id>]
+    # [--incremental]` — runs outside the MCP server so agents can wait out
+    # a long first sync in a background shell.
+    if len(sys.argv) > 1 and sys.argv[1] == "sync":
+        sys.exit(_cli_sync(sys.argv[2:]))
+
     # Launcher and browser auto-open are only for bundled (PyInstaller) releases.
     # In development, or when used as an MCP server by OpenCode/Claude/etc.,
     # we never want to force HTTP mode or open a browser.

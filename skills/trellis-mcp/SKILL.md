@@ -133,6 +133,10 @@ Re-analyze after implementing changes to catch unintended side effects. The code
    *What it does: Indexes the codebase into the code graph*
    *Check the `project_md` field in the response: if it reports `missing`, creating `project.md` is your next mandatory step (see Project.md section above) before any feature-level work.*
 
+   **⏱ LONG-RUNNING — the first sync of a large repo takes SEVERAL MINUTES (5-15 min). This is normal, not a hang.** Trellis calls run **async** on the server — a long sync won't block your other projects' calls — but each call returns **only when its work finishes** (not fire-and-forget), and calls on the **same project queue one at a time** behind it. **How to run it: invoke `trellis_sync` in background mode** (your harness's `run_in_background` / async tool-call option) **and keep working on other things** — don't sit blocked on it; your harness delivers a **system notification** when the result is ready. Do NOT poll in a loop, interrupt, cancel, or re-issue the call while pending — it is still running server-side, and duplicates only make that project's calls slower (MCP error -32001). **Your harness may have no background/async tool-call option at all (not every harness does) — if so, or if its timeout kills the call:** run the sync out-of-band: `trellis.exe sync <repo_path> --project-id <id>` (same exe your MCP config uses) in a background shell — it prints progress and exits when done; then `trellis_list_modules` returns instantly once the index exists.
+
+   To check whether a sync is still running, finished, or failed, call `trellis_sync_status(project_id=...)` — it reports running/completed/failed plus index size, for both MCP tool syncs and headless CLI syncs. While it says running, keep waiting; do not re-issue `trellis_sync`.
+
 2. **List features/modules**:
    ```
    trellis_list_modules(project_id="my-project")
@@ -250,7 +254,8 @@ Re-analyze after implementing changes to catch unintended side effects. The code
 
 | Tool | Parameters | Returns | When to Use |
 |------|-----------|---------|-------------|
-| `trellis_sync` | `project_id`, `repo_path`, `config_path`, `incremental` | Status, node count, file count | Once per project; again only after large pulls or stale results (the server file-watcher keeps the graph fresh) |
+| `trellis_sync` | `project_id`, `repo_path`, `config_path`, `incremental` | Status, node count, file count | Once per project; again only after large pulls or stale results (the server file-watcher keeps the graph fresh). ⚠ First sync takes SEVERAL MINUTES — call once, wait for completion, never retry (see Phase 1) |
+| `trellis_sync_status` | `project_id` | Sync state (running/completed/failed), index size, guidance | Check sync progress — including for headless `trellis.exe sync` runs; while it says running, keep waiting |
 | `trellis_list_modules` | `project_id` | List of directories with symbol counts | Understand structure |
 | `trellis_search_code` | `project_id`, `query`, `limit` | Matching functions/classes with paths | Find code by keyword |
 | `trellis_ast_search` | `project_id`, `query`, `node_type`, `returns`, `params`, `limit` | Matching symbols filtered by structure/signature | Find code by type, return type, or params (e.g. all `class` nodes) |

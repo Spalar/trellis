@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from typing import Optional
 
 
 def get_trellis_data_dir() -> Path:
@@ -76,6 +77,9 @@ def _record_project(project_path: Path) -> None:
     notes and this registry stay centralized.
     """
     try:
+        if any(part.startswith("_MEI") for part in project_path.parts):
+            # PyInstaller temp extraction dir — never a real project.
+            return
         project_dir = get_trellis_data_dir() / "projects" / project_path.name
         project_dir.mkdir(parents=True, exist_ok=True)
         marker = project_dir / "project.json"
@@ -86,6 +90,78 @@ def _record_project(project_path: Path) -> None:
             marker.write_text(json.dumps(payload), encoding="utf-8")
     except OSError:
         pass
+
+
+def register_project(project_id: str, repo_path) -> None:
+    """Explicitly map a project_id to a repo path in the registry (~/.trellis/projects/<id>/project.json).
+
+    Unlike _record_project (keyed by repo basename), this records the id the
+    agent actually used, so later calls with the same id resolve via the
+    registry. Ids that are empty or look like paths fall back to the repo
+    basename.
+    """
+    repo = Path(repo_path).resolve()
+    pid = (project_id or "").strip()
+    if not pid or "/" in pid or "\\" in pid or ":" in pid:
+        pid = repo.name
+    try:
+        project_dir = get_trellis_data_dir() / "projects" / pid
+        project_dir.mkdir(parents=True, exist_ok=True)
+        marker = project_dir / "project.json"
+        payload = {"path": str(repo)}
+        if not marker.exists() or marker.read_text(encoding="utf-8") != json.dumps(
+            payload
+        ):
+            marker.write_text(json.dumps(payload), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _sync_status_dir(project_id: str) -> Optional[Path]:
+    """Registry dir for a sanitized project id, or None when the id cannot be
+    sanitized to a safe key (empty or path-like: no repo path to fall back to
+    here, unlike register_project)."""
+    pid = (project_id or "").strip()
+    if not pid or "/" in pid or "\\" in pid or ":" in pid:
+        return None
+    return get_trellis_data_dir() / "projects" / pid
+
+
+def write_sync_status(project_id: str, status: dict) -> None:
+    """Persist sync progress to ~/.trellis/projects/<sanitized id>/sync_status.json.
+
+    Written atomically (tmp file + os.replace) so readers never see a partial
+    JSON document. Skipped silently when the id sanitizes to nothing — a
+    status write must never break the sync itself.
+    """
+    project_dir = _sync_status_dir(project_id)
+    if project_dir is None:
+        return
+    try:
+        project_dir.mkdir(parents=True, exist_ok=True)
+        target = project_dir / "sync_status.json"
+        tmp = project_dir / "sync_status.json.tmp"
+        tmp.write_text(json.dumps(status), encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError:
+        pass
+
+
+def read_sync_status(project_id: str) -> Optional[dict]:
+    """Read persisted sync status for a project id.
+
+    Returns the status dict written by write_sync_status, or None when absent
+    or unreadable (unknown id, corrupt JSON, path-like id).
+    """
+    project_dir = _sync_status_dir(project_id)
+    if project_dir is None:
+        return None
+    try:
+        return json.loads(
+            (project_dir / "sync_status.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def list_registered_projects() -> dict:
