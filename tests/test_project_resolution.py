@@ -113,8 +113,6 @@ def test_register_project_maps_agent_project_id(monkeypatch, tmp_path):
     """trellis_sync's explicit registration records the agent's project_id
     pointing at the resolved repo, so later calls with that id hit the
     registry."""
-    import json
-
     from src.trellis.utils import list_registered_projects, register_project
 
     monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path))

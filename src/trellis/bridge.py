@@ -187,8 +187,6 @@ class CodeGraphBridge:
         to still be a code-graph-mcp process before killing. Never touches
         other projects' servers or unrelated processes.
         """
-        import subprocess
-
         alive: List[int] = []
         own_pid = self._proc.pid if (self._proc and self._proc.poll() is None) else None
         for pid in self._read_server_pids():
@@ -682,21 +680,24 @@ class CodeGraphBridge:
     ) -> Dict[str, Any]:
         """Trace an HTTP route to its handler and downstream calls.
 
-        Passthrough to the `find_http_route` MCP tool (aliased upstream as
-        `trace_http_chain`). For web projects: given a route like
-        'GET /api/users', returns the handler and its call chain.
+        Tries the `find_http_route` MCP tool (aliased upstream as
+        `trace_http_chain`); falls back to the CLI `trace` command. For web
+        projects: given a route like 'GET /api/users', returns the handler
+        and its call chain.
 
         Returns an empty/negative result dict on projects with no indexed
         routes — not an error.
         """
-        result = self._call(
+        return self._mcp_then_cli(
             "find_http_route",
-            route_path=route_path,
-            depth=depth,
-            include_middleware=include_middleware,
+            {
+                "route_path": route_path,
+                "depth": depth,
+                "include_middleware": include_middleware,
+            },
+            ["trace", route_path],
+            cli_parsers.parse_trace,
         )
-        normalized = self._normalize_result(result)
-        return normalized if isinstance(normalized, dict) else {"result": normalized}
 
     def get_call_graph(
         self,
@@ -795,10 +796,6 @@ class CodeGraphBridge:
             ["overview", module_path],
             cli_parsers.parse_overview,
         )
-
-    def trace_http_route(self, route: str) -> Dict[str, Any]:
-        """Trace HTTP route to handler and downstream calls."""
-        return self._cli_parse(cli_parsers.parse_trace, "trace", route)
 
     def find_dead_code(self, path: str = None) -> List[Dict[str, Any]]:
         """Find unused code, filtering out constructors of inherited base classes."""

@@ -218,19 +218,29 @@ def create_launcher(release_dir: Path) -> None:
         launcher = release_dir / "start-trellis.bat"
         launcher.write_text(
             "@echo off\n"
-            "echo Starting Trellis...\n"
+            "echo Starting Trellis (UI + API + MCP over HTTP)...\n"
             "echo URL: http://localhost:17317\n"
             "echo Press Ctrl+C to stop\n"
             "start http://localhost:17317\n"
+            "rem No subcommand = bundled default: HTTP transport serving the UI,\n"
+            "rem REST endpoints, and the MCP endpoint on port 17317.\n"
+            "rem Other modes: trellis.exe mcp (stdio MCP server, or HTTP via\n"
+            "rem   TRELLIS_TRANSPORT=http), trellis.exe api (REST API only, /docs),\n"
+            "rem   trellis.exe ui (visualizer + API), trellis.exe sync ^<repo^>\n"
             "trellis.exe\n"
         )
     else:
         launcher = release_dir / "start-trellis.sh"
         launcher.write_text(
             "#!/bin/bash\n"
-            'echo "Starting Trellis..."\n'
+            'echo "Starting Trellis (UI + API + MCP over HTTP)..."\n'
             'echo "URL: http://localhost:17317"\n'
             'echo "Press Ctrl+C to stop"\n'
+            "# No subcommand = bundled default: HTTP transport serving the UI,\n"
+            "# REST endpoints, and the MCP endpoint on port 17317.\n"
+            "# Other modes: ./trellis mcp (stdio MCP server, or HTTP via\n"
+            "#   TRELLIS_TRANSPORT=http), ./trellis api (REST API only, /docs),\n"
+            "#   ./trellis ui (visualizer + API), ./trellis sync <repo>\n"
             "python -c \"import webbrowser; webbrowser.open('http://localhost:17317')\"\n"
             "./trellis\n"
         )
@@ -255,6 +265,16 @@ def create_readme(release_dir: Path, version: str) -> None:
         "   - Windows: double-click start-trellis.bat\n"
         "   - macOS/Linux: run ./start-trellis.sh\n"
         "3. Your browser will open http://localhost:17317\n\n"
+        "Command-line modes (trellis.exe <mode>):\n"
+        "  (no mode)  Bundled default: HTTP transport serving the visualizer UI,\n"
+        "             REST endpoints, and the MCP endpoint on port 17317.\n"
+        "  mcp        MCP server for AI coding agents. stdio by default; set\n"
+        "             TRELLIS_TRANSPORT=http to serve MCP + REST + UI over HTTP.\n"
+        "  api        REST API only (FastAPI, interactive docs at /docs) on\n"
+        "             TRELLIS_HOST:TRELLIS_PORT (default 127.0.0.1:17317).\n"
+        "  ui         Visualizer UI + REST API on TRELLIS_HOST:TRELLIS_PORT.\n"
+        "  sync <repo> [--project-id <id>] [--incremental]\n"
+        "             Headless index of a repository, then exit.\n\n"
         "No Python installation required.\n\n"
         f"Bundled code-graph-mcp: v{cg_version} ({commit_hash[:12]})\n"
     )
@@ -333,9 +353,24 @@ def _with_lock_retry(description: str, operation) -> None:
 def deploy_to_dist(out_dir: Path, dist_dir: Path, release_name: str) -> None:
     """Copy fresh build artifacts from out/ into dist/ (the runtime location)."""
     artifacts = [
-        ("trellis.exe (onefile executable)", out_dir / "trellis.exe", dist_dir / "trellis.exe", "file"),
-        ("trellis/ (onefolder collection)", out_dir / "trellis", dist_dir / "trellis", "dir"),
-        (f"{release_name}.zip", out_dir / f"{release_name}.zip", dist_dir / f"{release_name}.zip", "file"),
+        (
+            "trellis.exe (onefile executable)",
+            out_dir / "trellis.exe",
+            dist_dir / "trellis.exe",
+            "file",
+        ),
+        (
+            "trellis/ (onefolder collection)",
+            out_dir / "trellis",
+            dist_dir / "trellis",
+            "dir",
+        ),
+        (
+            f"{release_name}.zip",
+            out_dir / f"{release_name}.zip",
+            dist_dir / f"{release_name}.zip",
+            "file",
+        ),
     ]
 
     for description, source, target, kind in artifacts:

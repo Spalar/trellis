@@ -103,11 +103,20 @@ Combines technical + feature impact:
 
 ### 5. Server (Python)
 
-**File**: `server.py`
+Three independently-startable components sharing one core, dispatched by `server.py`:
 
-Dual-mode server:
-- **MCP Mode**: stdio transport for AI agents (16 tools)
-- **HTTP Mode**: FastAPI server for UI (REST endpoints)
+```
+python server.py            # MCP only, stdio (default; TRELLIS_TRANSPORT=http for HTTP MCP)
+python server.py mcp        # same as above, explicit
+python server.py api        # REST API only (FastAPI, /docs), port 17317
+python server.py ui         # Visualizer + REST API in one process, port 17317
+python server.py sync <repo> [--project-id <id>] [--incremental]
+```
+
+- **`src/trellis/core.py`** — shared state used by all three: project-path resolution, the LRU `CodeGraphBridge` cache, sync-job tracking, spec manager, and the `LocalHttpGuard` ASGI middleware (local-host check + bearer token, `TRELLIS_API_KEY` / `TRELLIS_ALLOW_NO_AUTH`).
+- **`src/trellis/mcp_server.py`** — FastMCP server (`create_mcp_server`) for AI agents (stdio default; `/mcp` endpoint when HTTP transport is enabled).
+- **`src/trellis/api.py`** — FastAPI app (`create_api_app`) with auto-generated OpenAPI docs at `/docs`. This is the integration surface for external tools: `GET /projects` lists every registered project with index and sync status.
+- **`src/trellis/ui.py`** — serves `visualizer.html` + `/vendor/*` and mounts the API app, so `trellis ui` is zero-config. The UI can instead point at a separately-running API via `?api=<url>`.
 
 **MCP Tools**:
 - Code graph: sync, search, get_function, analyze_impact, trace_path, detect_hotspots
@@ -122,12 +131,20 @@ Dual-mode server:
 - `trellis_analyze_diff` (when enabled) caps: `TRELLIS_MAX_DIFF_CHARS` (200k),
   `TRELLIS_MAX_DIFF_FILES` (50), `TRELLIS_MAX_DIFF_FUNCTIONS` (25)
 
-**HTTP Endpoints**:
-- `/graph/{project_id}` - Graph data
-- `/knowledge-graph/{project_id}` - Notes + code
-- `/note/{project_id}/{note_id}` - CRUD notes
-- `/feature/{project_id}/impact/{symbol}` - Feature impact
-- `/projects` - List available projects
+**HTTP Endpoints** (served by `trellis api` and `trellis ui`; all paths are prefixed exactly as shown):
+- `GET /projects` - All registered projects with index/sync status (integration entry point)
+- `GET /projects/{project_id}` - Full detail: index stats (nodes/files/modules), sync, spec, notes count + per-tag counts
+- `DELETE /projects/{project_id}?delete_data=false` - Unregister a project (evicts its engine); `delete_data=true` also removes Trellis-side data. The repo itself is never touched
+- `GET /stats/usage` - MCP usage telemetry: total/per-tool/error counts + last 50 calls (persisted across restarts)
+- `GET /graph/{project_id}` - Graph data; `POST /graph/{project_id}/sync` - (Re)build index
+- `GET /graph/{project_id}/status|tour|health` - Sync state, reading tour, architecture health
+- `GET /graph/{project_id}/impact/{symbol}` - Technical impact
+- `GET /feature/{project_id}/impact|pointers|context|divergence/{symbol}` - Feature analysis
+- `GET|POST /spec/{project_id}`, `GET /spec/{project_id}/alignment` - Feature specs
+- `GET /knowledge-graph/{project_id}` - Notes + code; `GET|POST|DELETE /note/{project_id}/{note_id}` - Note CRUD
+- `GET /health` - Liveness (no token required, along with `/`)
+
+Everything except `/` and `/health` requires the bearer token (`Authorization: Bearer $TRELLIS_API_KEY`) unless `TRELLIS_ALLOW_NO_AUTH=true`. Interactive API docs are at `/docs` when the API is running.
 
 ### 6. Visualizer (HTML/JS)
 
@@ -326,8 +343,12 @@ trellis/
 ├── third_party/
 │   └── code-graph-mcp/          # Git submodule
 ├── visualizer.html              # Web UI
-├── server.py                    # MCP + HTTP server
-├── start_server.py              # Launch script
+├── server.py                    # CLI dispatcher (mcp | api | ui | sync)
+├── src/trellis/
+│   ├── core.py                  # Shared state: bridges, projects, guard
+│   ├── mcp_server.py            # MCP component (FastMCP tools)
+│   ├── api.py                   # REST API component (FastAPI)
+│   └── ui.py                    # UI component (visualizer + mounted API)
 ├── project.md                   # Feature specifications
 └── README.md                    # Quick start
 ```
@@ -353,11 +374,7 @@ python scripts/build_bridge.py
 ### Running Tests
 
 ```bash
-# Integration tests
-python tests/test_integration.py
-
-# HTTP tests
-python tests/test_http_integration.py
+python -m pytest                 # full suite (API, MCP bridge, knowledge graph, ...)
 ```
 
 ## License

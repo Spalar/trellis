@@ -11,3 +11,13 @@ __pycache__
 dist
 build
 .mypy_cache
+# Slim the build context — none of these are needed at runtime
+out
+eval
+docs
+tests
+client
+.agent
+.vscode
+.trellis
+.env

@@ -117,6 +117,28 @@ def register_project(project_id: str, repo_path) -> None:
         pass
 
 
+def unregister_project(project_id: str) -> bool:
+    """Remove a project_id from the registry (inverse of register_project).
+
+    Deletes ~/.trellis/projects/<id>/project.json; the rest of the project's
+    data dir (notes, sync status) is left in place unless the caller removes
+    it explicitly (see DELETE /projects/{id}?delete_data=true). Path-like ids
+    sanitize to nothing (same rule as _sync_status_dir) and unknown ids are
+    tolerated. Never touches the repository path itself.
+    """
+    pid = (project_id or "").strip()
+    if not pid or "/" in pid or "\\" in pid or ":" in pid:
+        return False
+    try:
+        marker = get_trellis_data_dir() / "projects" / pid / "project.json"
+        if marker.exists():
+            marker.unlink()
+            return True
+    except OSError:
+        pass
+    return False
+
+
 def _sync_status_dir(project_id: str) -> Optional[Path]:
     """Registry dir for a sanitized project id, or None when the id cannot be
     sanitized to a safe key (empty or path-like: no repo path to fall back to

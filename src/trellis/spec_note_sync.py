@@ -14,7 +14,6 @@ Rules:
 from __future__ import annotations
 
 import re
-from pathlib import Path
 from typing import Any, Dict
 
 AUTO_MARKER = "<!-- auto-generated from project.md; edit project.md, not this note -->"

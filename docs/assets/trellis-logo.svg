@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="256" height="256">
+  <style>
+    :root { --vein: #2f6b45; --sap: #7cc496; }
+    .edge {
+      fill: none;
+      stroke: var(--vein);
+      stroke-linecap: round;
+      stroke-dasharray: 1;
+      stroke-dashoffset: 1;
+      animation: draw 0.9s cubic-bezier(.6,0,.3,1) forwards;
+    }
+    .trunk { stroke-width: 3.4; }
+    .twig  { stroke-width: 2.1; }
+    .tip   { stroke-width: 1.7; }
+    @keyframes draw { to { stroke-dashoffset: 0; } }
+
+    .node {
+      fill: var(--vein);
+      opacity: 0;
+      transform: scale(0);
+      transform-box: fill-box;
+      transform-origin: center;
+      animation: pop 0.45s ease-out forwards;
+    }
+    @keyframes pop { to { opacity: 1; transform: scale(1); } }
+
+    .d1 { animation-delay: .10s; }
+    .d2 { animation-delay: .40s; }
+    .d3 { animation-delay: .65s; }
+    .d4 { animation-delay: .90s; }
+    .d5 { animation-delay: .55s; }
+    .d6 { animation-delay: .80s; }
+    .d7 { animation-delay: 1.05s; }
+    .d8 { animation-delay: 1.20s; }
+
+    .heart { animation: beat 3s ease-in-out 1.6s infinite; }
+    @keyframes beat {
+      0%, 100% { transform: scale(1); }
+      12%      { transform: scale(1.35); }
+      24%      { transform: scale(1); }
+    }
+  </style>
+
+  <!-- veins -->
+  <g>
+    <path class="edge trunk d1" pathLength="1" d="M64 12 L64 66"/>
+    <path class="edge trunk d1" pathLength="1" d="M64 66 L64 116"/>
+    <path class="edge twig  d2" pathLength="1" d="M37 39 L64 66"/>
+    <path class="edge twig  d2" pathLength="1" d="M91 39 L64 66"/>
+    <path class="edge twig  d2" pathLength="1" d="M64 66 L37 93"/>
+    <path class="edge twig  d2" pathLength="1" d="M64 66 L91 93"/>
+    <path class="edge tip   d3" pathLength="1" d="M64 12 L37 39"/>
+    <path class="edge tip   d3" pathLength="1" d="M64 12 L91 39"/>
+    <path class="edge tip   d4" pathLength="1" d="M37 39 L14 66"/>
+    <path class="edge tip   d4" pathLength="1" d="M91 39 L114 66"/>
+    <path class="edge tip   d4" pathLength="1" d="M14 66 L37 93"/>
+    <path class="edge tip   d4" pathLength="1" d="M114 66 L91 93"/>
+    <path class="edge twig  d3" pathLength="1" d="M37 93 L64 116"/>
+    <path class="edge twig  d3" pathLength="1" d="M91 93 L64 116"/>
+  </g>
+
+  <!-- nodes -->
+  <g>
+    <circle class="node d5" cx="64" cy="66" r="4.4"/>
+    <circle class="node d6" cx="37" cy="39" r="2.7"/>
+    <circle class="node d6" cx="91" cy="39" r="2.7"/>
+    <circle class="node d6" cx="37" cy="93" r="2.7"/>
+    <circle class="node d6" cx="91" cy="93" r="2.7"/>
+    <circle class="node d7" cx="64" cy="12" r="3.4"/>
+    <circle class="node d7" cx="14" cy="66" r="3.4"/>
+    <circle class="node d7" cx="114" cy="66" r="3.4"/>
+    <circle class="node d7" cx="64" cy="116" r="3.4"/>
+  </g>
+
+  <!-- sap pulses travelling up the veins -->
+  <g fill="var(--sap)">
+    <circle r="3">
+      <animateMotion dur="3.2s" begin="1.4s" repeatCount="indefinite"
+        path="M64 116 L64 12" calcMode="linear"/>
+      <animate attributeName="opacity" dur="3.2s" begin="1.4s" repeatCount="indefinite"
+        values="0;1;1;0" keyTimes="0;0.15;0.8;1"/>
+    </circle>
+    <circle r="2.4">
+      <animateMotion dur="3.2s" begin="2.2s" repeatCount="indefinite"
+        path="M64 116 L37 93 L14 66 L37 39 L64 12" calcMode="linear"/>
+      <animate attributeName="opacity" dur="3.2s" begin="2.2s" repeatCount="indefinite"
+        values="0;1;1;0" keyTimes="0;0.12;0.8;1"/>
+    </circle>
+    <circle r="2.4">
+      <animateMotion dur="3.2s" begin="3.0s" repeatCount="indefinite"
+        path="M64 116 L91 93 L114 66 L91 39 L64 12" calcMode="linear"/>
+      <animate attributeName="opacity" dur="3.2s" begin="3.0s" repeatCount="indefinite"
+        values="0;1;1;0" keyTimes="0;0.12;0.8;1"/>
+    </circle>
+  </g>
+
+  <!-- heartbeat at the center node -->
+  <circle class="heart" cx="64" cy="66" r="4.4" fill="var(--sap)" opacity="0.85"
+    style="transform-box: fill-box; transform-origin: center;"/>
+</svg>

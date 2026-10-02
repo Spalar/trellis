@@ -1,0 +1,43 @@
+# Reference sidecar setup: Trellis exposes REST API + UI + MCP endpoint (/mcp)
+# on one port. Other services in the compose network reach it at
+# http://trellis:17317 with header `Authorization: Bearer $TRELLIS_API_KEY`.
+#
+#   TRELLIS_API_KEY=secret docker compose up --build
+
+services:
+  trellis:
+    build: .
+    image: trellis:local
+    environment:
+      # Required: non-loopback binds refuse to start without a key.
+      TRELLIS_API_KEY: ${TRELLIS_API_KEY:?Set TRELLIS_API_KEY in your environment}
+    ports:
+      - "17317:17317"
+    volumes:
+      # Registry + sync status + notes. Named volume keeps registered
+      # projects across container restarts.
+      - trellis-data:/data
+      # Mount every repo you want analyzed at the SAME absolute path you
+      # register it under (indexes live in <repo>/.code-graph and persist
+      # with the mount):
+      # - /path/to/my-app:/repos/my-app
+    restart: unless-stopped
+
+  # One-shot example: register + index a repo at deploy time. Run with:
+  #   docker compose run --rm trellis-sync
+  # trellis-sync:
+  #   image: trellis:local
+  #   depends_on: [trellis]
+  #   volumes:
+  #     - trellis-data:/data
+  #     - /path/to/my-app:/repos/my-app
+  #   command: ["sync", "/repos/my-app", "--project-id", "my-app"]
+
+  # Your app would consume the API like this:
+  # my-app:
+  #   environment:
+  #     TRELLIS_URL: http://trellis:17317
+  #     TRELLIS_API_KEY: ${TRELLIS_API_KEY}
+
+volumes:
+  trellis-data:

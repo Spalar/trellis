@@ -33,22 +33,26 @@ Trellis is a **dual-knowledge system** that combines code analysis with document
 
 ## Quick Start
 
-### 1. Start the Server
+New here? See **[Integration Guide](INTEGRATION.md)** for running Trellis as a
+sidecar service (Docker or binary) and consuming it from your own app via the
+REST API, the Python SDK, or MCP-over-HTTP.
+
+Trellis runs as three components — start only what you need:
 
 ```bash
-# Using HTTP mode (recommended for UI)
-python start_server.py
+python server.py ui    # Visualizer + REST API (zero-config, browser UI)
+python server.py api   # REST API only (headless; interactive docs at /docs)
+python server.py       # MCP server for AI agents (stdio)
 # Server runs on http://localhost:17317
-
-# Or using MCP mode (for AI agents)
-python server.py
 ```
+
+MCP over HTTP instead of stdio: `TRELLIS_TRANSPORT=http python server.py mcp`.
 
 ### 2. Index Your Repository
 
 ```bash
 # Index current directory
-python -c "from src.trellis import CodeGraphBridge; CodeGraphBridge('.').sync_project()"
+python server.py sync .
 ```
 
 ### 3. Open the Visualizer
@@ -66,7 +70,7 @@ Open http://localhost:17317/ in your browser.
 
 ### 4. Create Knowledge Notes
 
-In the Doc Graph view, click **+ New Note** or use the API:
+In the Doc Graph view, click **+ New Note** or use the API (add `-H "Authorization: Bearer $TRELLIS_API_KEY"` if a key is set):
 
 ```bash
 curl -X POST http://localhost:17317/note/trellis/my-feature \
@@ -213,6 +217,8 @@ Create `.env`:
 ```
 TRELLIS_TRANSPORT=stdio
 TRELLIS_ALLOW_NO_AUTH=true
+# Optional: stable bearer token for API/MCP-over-HTTP clients (random per-launch token otherwise)
+# TRELLIS_API_KEY=your-secret
 ```
 
 ### Security
@@ -221,6 +227,29 @@ TRELLIS_ALLOW_NO_AUTH=true
 - No external API calls in production
 - Optional model download is disabled by default
 - Run `python scripts/security_scan.py` to audit
+
+## Example: Integrating the API
+
+Start the API headless and query it from your own tools:
+
+```bash
+TRELLIS_API_KEY=my-secret python server.py api
+
+# List every registered project with index + sync status
+curl -H "Authorization: Bearer my-secret" http://localhost:17317/projects
+```
+
+Each entry looks like:
+
+```json
+{"id": "my-project", "name": "my-project", "path": "/repos/my-project",
+ "index_exists": true, "nodes": 1146, "files": 109,
+ "sync": {"state": "completed", "nodes": 1146, "files": 109, ...}}
+```
+
+Interactive OpenAPI documentation (try-it-out for every endpoint) is at
+`http://localhost:17317/docs` while the API is running. The UI can also be
+pointed at a separately-running API: `http://localhost:17317/?api=http://other-host:17317`.
 
 ## Example: Impact Analysis
 
