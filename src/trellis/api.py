@@ -4,17 +4,20 @@ REST API exposing the graph, feature, spec, and knowledge-graph endpoints.
 Path-for-path compatible with the custom routes that previously lived on the
 FastMCP HTTP transport, so the visualizer works unchanged against either.
 All shared state lives in src.trellis.core; the local-HTTP guard middleware
-is installed here. The UI entry point (src/trellis/ui.py) mounts this app.
+is installed here. The visualizer UI routes are mounted into this app by
+default (src/trellis/ui.py; disable with TRELLIS_UI=off), so every mode
+serves the UI at "/" on the same origin.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from starlette.responses import FileResponse, JSONResponse
+from starlette.responses import JSONResponse
 
 from src.trellis import core
 
@@ -28,21 +31,6 @@ def create_api_app(version: str) -> FastAPI:
     async def health():
         """Health check."""
         return JSONResponse({"status": "ok", "version": version})
-
-    @app.get("/vendor/{filename}")
-    async def vendor_assets(filename: str):
-        """Serve vendored JS libraries (d3, marked) — local, no CDN.
-
-        Loaded via <script src> from the UI page, which cannot send custom
-        headers, so these public static assets are exempt from the token check
-        (the guard middleware whitelists the /vendor/ prefix too).
-        """
-        if not re.fullmatch(r"[A-Za-z0-9._-]+", filename):
-            return JSONResponse({"error": "Invalid filename"}, status_code=400)
-        asset = core.TRELLIS_ROOT / "vendor" / filename
-        if not asset.is_file():
-            return JSONResponse({"error": "Not found"}, status_code=404)
-        return FileResponse(asset)
 
     @app.get("/graph/{project_id}")
     async def graph_get(project_id: str):
@@ -543,5 +531,17 @@ def create_api_app(version: str) -> FastAPI:
         from src.trellis import usage
 
         return JSONResponse(await asyncio.to_thread(usage.get_usage))
+
+    # The UI ships with the API: every mode serves the visualizer at "/".
+    # Opt out for genuinely headless deployments with TRELLIS_UI=off.
+    if os.environ.get("TRELLIS_UI", "").strip().lower() not in {
+        "0",
+        "off",
+        "false",
+        "no",
+    }:
+        from src.trellis.ui import mount_ui_routes
+
+        mount_ui_routes(app, version)
 
     return app

@@ -7,7 +7,7 @@ surfaces on a single port (`17317` by default):
 |---|---|---|
 | REST API | `/projects`, `/graph/...`, `/feature/...`, `/spec/...`, ... | Your application code |
 | MCP endpoint | `/mcp` | AI agents (Claude, Cursor, ...) |
-| Visualizer UI | `/` | Humans (optional) |
+| Visualizer UI | `/` | Humans (served by every mode, no extra deployment) |
 
 The project registry is global, so one Trellis service already answers for every
 indexed project — `GET /projects` is the "all active projects" view.
@@ -114,11 +114,16 @@ The same 20 tools available over stdio then work over the network.
 - **Network binds** (`0.0.0.0` or a non-loopback IP): Host/Origin checks are
   relaxed (the bearer token is the protection) and the token is **always**
   required — the server refuses to start on a network interface without
-  `TRELLIS_API_KEY` set.
+  `TRELLIS_API_KEY` set. The UI page (`/`) embeds the key, so it too requires
+  credentials: open it as `http://<host>:17317/?token=your-secret` — the page
+  then uses that token for its API calls. Without credentials `/` returns 401.
 - `TRELLIS_ALLOW_NO_AUTH=true` disables the token check for local development
   only; it has no effect on network binds.
 - Known peers can be allowlisted extra-hostname style with
   `TRELLIS_TRUSTED_HOSTS=host1,host2` (applies in both modes).
+- **UI availability**: every mode serves the visualizer at `/` (the UI is
+  static files inside the service — no separate deployment). For genuinely
+  headless API processes, set `TRELLIS_UI=off` and `/` returns 404.
 
 ## Environment variables
 
@@ -131,3 +136,4 @@ The same 20 tools available over stdio then work over the network.
 | `TRELLIS_TRANSPORT` | `stdio` | `http` makes the MCP server speak HTTP (used by the image) |
 | `TRELLIS_ALLOW_NO_AUTH` | off | Skip token check, loopback binds only |
 | `TRELLIS_TRUSTED_HOSTS` | _(empty)_ | Extra allowed Host/Origin names |
+| `TRELLIS_UI` | `on` | `off` makes the API headless (no visualizer at `/`) |

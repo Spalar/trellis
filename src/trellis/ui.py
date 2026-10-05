@@ -1,8 +1,10 @@
-"""Visualizer UI app for Trellis.
+"""Visualizer UI routes for Trellis.
 
-Serves visualizer.html (with the launch token injected) and the vendored
-static assets, and mounts the FastAPI backend (src/trellis/api.py) at "/"
-after those routes so every API endpoint is reachable on the same origin.
+`mount_ui_routes` adds the visualizer (``/``) and vendored static assets to
+any FastAPI app — the API serves the UI by default, so every mode exposes it
+on the same origin (disable with ``TRELLIS_UI=off``). ``create_ui_app``
+builds the standalone UI+API app (optionally splicing in an MCP HTTP app),
+sharing the same route mounting.
 """
 
 from __future__ import annotations
@@ -16,28 +18,24 @@ from starlette.responses import FileResponse, JSONResponse
 from src.trellis import core
 
 
-def create_ui_app(api_app: FastAPI, version: str, mcp_app=None) -> FastAPI:
-    """Build the UI app serving the visualizer plus the mounted API backend.
+def mount_ui_routes(app: FastAPI, version: str) -> None:
+    """Add the visualizer UI routes (``/`` and ``/vendor/{filename}``) to app.
 
-    When ``mcp_app`` is given (a FastMCP HTTP app, e.g. ``mcp.http_app()``),
-    its MCP protocol route (at /mcp) is added so the endpoint shares the same
-    port as the UI and REST routes — the layout the monolithic server used to
-    serve. Its lifespan is wired into this app (required by FastMCP's
-    streamable-http session manager). Note the routes are spliced in rather
-    than mounted: a Mount("/mcp") does not match the bare "/mcp" path under
-    Starlette 1.x.
+    The served page embeds the launch token so same-origin fetches are
+    authenticated. On loopback binds ``/`` is public (the guard's Host/Origin
+    checks keep the token local-only); on trusted-network binds the guard
+    requires credentials for ``/`` too, so the page only ever renders for
+    callers who already hold the token.
     """
-    lifespan = mcp_app.lifespan if mcp_app is not None else None
-    app = FastAPI(title="trellis-ui", version=version, lifespan=lifespan)
+    visualizer_path = core.TRELLIS_ROOT / "visualizer.html"
 
     @app.get("/")
     async def root():
         """Serve visualizer HTML with the launch token embedded."""
-        visualizer_path = core.TRELLIS_ROOT / "visualizer.html"
         if visualizer_path.exists():
             html = visualizer_path.read_text(encoding="utf-8")
             token_script = (
-                f'<script>window.TRELLIS_TOKEN = "{core.http_token}";</script>'
+                f'<script>window.TRELLIS_TOKEN = "{core.current_token()}";</script>'
             )
             if "</head>" in html:
                 html = html.replace("</head>", token_script + "</head>", 1)
@@ -56,9 +54,25 @@ def create_ui_app(api_app: FastAPI, version: str, mcp_app=None) -> FastAPI:
             return JSONResponse({"error": "Not found"}, status_code=404)
         return FileResponse(asset)
 
-    # Added last-but-one so the routes above take precedence (Starlette matches
-    # in registration order); the API mount is the catch-all. The MCP routes
-    # come before it. The API app carries its own guard middleware.
+
+def create_ui_app(api_app: FastAPI, version: str, mcp_app=None) -> FastAPI:
+    """Build the UI app serving the visualizer plus the mounted API backend.
+
+    When ``mcp_app`` is given (a FastMCP HTTP app, e.g. ``mcp.http_app()``),
+    its MCP protocol route (at /mcp) is added so the endpoint shares the same
+    port as the UI and REST routes — the layout the monolithic server used to
+    serve. Its lifespan is wired into this app (required by FastMCP's
+    streamable-http session manager). Note the routes are spliced in rather
+    than mounted: a Mount("/mcp") does not match the bare "/mcp" path under
+    Starlette 1.x.
+    """
+    lifespan = mcp_app.lifespan if mcp_app is not None else None
+    app = FastAPI(title="trellis-ui", version=version, lifespan=lifespan)
+    mount_ui_routes(app, version)
+
+    # Added last-but-one so the UI routes above take precedence (Starlette
+    # matches in registration order); the API mount is the catch-all. The MCP
+    # routes come before it. The API app carries its own guard middleware.
     if mcp_app is not None:
         app.router.routes.extend(mcp_app.routes)
     app.mount("/", api_app)

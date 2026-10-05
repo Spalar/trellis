@@ -20,7 +20,7 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from spec_manager import SpecManager
 
@@ -143,6 +143,9 @@ def module_entry(m: Dict[str, Any]) -> Dict[str, Any]:
 #      into the served visualizer page (never readable cross-origin, since
 #      no CORS headers are ever emitted). TRELLIS_ALLOW_NO_AUTH=true disables
 #      the token check entirely (local development only).
+#      On trusted-network binds "/" is NOT public: the served page embeds the
+#      token, so it requires credentials like everything else. Browsers cannot
+#      set headers on navigation, so there "/" also accepts ?token=<key>.
 #   3. If an Origin header is present it must be a local origin — blocks
 #      cross-site form/fetch CSRF on mutating requests.
 #
@@ -162,6 +165,15 @@ http_token = os.environ.get("TRELLIS_API_KEY", "").strip() or secrets.token_hex(
 def _http_token() -> str:
     """Token enforced by the guard: TRELLIS_API_KEY if set, else launch token."""
     return os.environ.get("TRELLIS_API_KEY", "").strip() or http_token
+
+
+def current_token() -> str:
+    """Token to embed in the served UI page (TRELLIS_API_KEY or launch token).
+
+    Read dynamically so the page always carries the same token the guard
+    enforces, even if TRELLIS_API_KEY appeared after import time.
+    """
+    return _http_token()
 
 
 def _local_hostnames() -> set[str]:
@@ -244,9 +256,17 @@ class LocalHttpGuard:
             await self._reject(send, 403, "Forbidden: untrusted Host header")
             return
 
+        # Paths that never require a token: /health (liveness) in both modes,
+        # and "/" (the UI entry) only on loopback binds — the served page
+        # embeds the token, and the Host/Origin checks keep that local-only.
+        # On trusted-network binds the token must be presented like for any
+        # other path; browsers can't set headers on navigation, so "/" also
+        # accepts ?token=<key> there.
+        public_paths = {"/health"} if trusted else {"/", "/health"}
+
         if (
             (trusted or not _no_auth_enabled())
-            and path not in ("/", "/health")
+            and path not in public_paths
             and not path.startswith("/vendor/")
         ):
             auth = headers.get("authorization", "")
@@ -257,6 +277,10 @@ class LocalHttpGuard:
                 bool(headers.get("x-trellis-token"))
                 and hmac.compare_digest(headers["x-trellis-token"], token)
             )
+            if not token_ok and trusted and path == "/":
+                query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
+                presented = query.get("token", [""])[0]
+                token_ok = bool(presented) and hmac.compare_digest(presented, token)
             if not token_ok:
                 await self._reject(
                     send,

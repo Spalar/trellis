@@ -116,7 +116,7 @@ python server.py sync <repo> [--project-id <id>] [--incremental]
 - **`src/trellis/core.py`** — shared state used by all three: project-path resolution, the LRU `CodeGraphBridge` cache, sync-job tracking, spec manager, and the `LocalHttpGuard` ASGI middleware (local-host check + bearer token, `TRELLIS_API_KEY` / `TRELLIS_ALLOW_NO_AUTH`).
 - **`src/trellis/mcp_server.py`** — FastMCP server (`create_mcp_server`) for AI agents (stdio default; `/mcp` endpoint when HTTP transport is enabled).
 - **`src/trellis/api.py`** — FastAPI app (`create_api_app`) with auto-generated OpenAPI docs at `/docs`. This is the integration surface for external tools: `GET /projects` lists every registered project with index and sync status.
-- **`src/trellis/ui.py`** — serves `visualizer.html` + `/vendor/*` and mounts the API app, so `trellis ui` is zero-config. The UI can instead point at a separately-running API via `?api=<url>`.
+- **`src/trellis/ui.py`** — visualizer routes (`/`, `/vendor/*`), mounted into the API app by default so **every mode serves the UI** — no separate deployment (`TRELLIS_UI=off` for headless API processes). `trellis ui` additionally auto-opens the browser; `?api=<url>` still points a UI at a remote API.
 
 **MCP Tools**:
 - Code graph: sync, search, get_function, analyze_impact, trace_path, detect_hotspots
