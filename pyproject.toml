@@ -29,6 +29,8 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
+testpaths = ["tests", "client/tests"]
+norecursedirs = ["third_party", "eval", "build", "dist"]
 markers = [
   "server_test: marks tests that require a running HTTP server",
 ]

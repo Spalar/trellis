@@ -292,6 +292,13 @@ class SecurityScanner:
             "Python recursive delete",
             "Clean up local .trellis data before rebuild",
         ),
+        (
+            r"shutil\.rmtree, project_dir, ignore_errors=True",
+            "Python recursive delete",
+            "DELETE /projects/<id> removes the project's own data dir under "
+            "TRELLIS_DATA_DIR/projects; project_id is validated against path "
+            "traversal before the path is built",
+        ),
         # --- code-graph-mcp v0.156.0 (upstream, reviewed at pull upgrade) ---
         # Snapshot installer: HTTPS-only downloads with blake3 checksum
         # verification and redirect-downgrade protection. Inert in Trellis:

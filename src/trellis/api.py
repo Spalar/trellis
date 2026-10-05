@@ -505,6 +505,11 @@ def create_api_app(version: str) -> FastAPI:
             unregister_project,
         )
 
+        # The id arrives from the URL; validate before it is used as a
+        # registry key or, with delete_data, as a filesystem path.
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._-]*", project_id):
+            return JSONResponse({"error": "Invalid project id"}, status_code=400)
+
         registered = await asyncio.to_thread(list_registered_projects)
         if project_id not in registered:
             return JSONResponse(

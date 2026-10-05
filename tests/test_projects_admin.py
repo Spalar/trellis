@@ -123,6 +123,14 @@ def test_delete_project_unknown_is_404(api_client):
     assert "error" in resp.json()
 
 
+def test_delete_project_rejects_pathlike_id(api_client):
+    # URL-supplied ids are validated before use as registry keys/paths.
+    # (an encoded slash never reaches the route — it 404s at the router,
+    # which is safe too — so exercise a non-slash invalid character)
+    resp = api_client.delete("/projects/bad:id?delete_data=true", headers=_auth_headers())
+    assert resp.status_code == 400
+
+
 def test_stats_usage_defaults(api_client):
     resp = api_client.get("/stats/usage", headers=_auth_headers())
     assert resp.status_code == 200
