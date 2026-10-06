@@ -32,7 +32,7 @@ if os.environ.get("FASTMCP_SHOW_SERVER_BANNER") is None:
 if os.environ.get("FASTMCP_LOG_LEVEL") is None:
     os.environ["FASTMCP_LOG_LEVEL"] = "ERROR"
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 from src.trellis import core  # noqa: E402
 from src.trellis.api import create_api_app  # noqa: E402
