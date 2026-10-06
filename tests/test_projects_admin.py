@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -68,6 +70,18 @@ def test_project_detail_notes_never_fail(api_client, registered_repo, monkeypatc
     resp = api_client.get("/projects/demo", headers=_auth_headers())
     assert resp.status_code == 200
     assert resp.json()["notes"] == {"total": 0, "by_tag": {}}
+
+
+def test_project_search_endpoint(api_client, monkeypatch):
+    """GET /projects/{id}/search is the REST equivalent of trellis_search_code."""
+    fake_bridge = SimpleNamespace(search=lambda q, limit=10: [{"name": q, "limit": limit}])
+    monkeypatch.setattr(core, "get_bridge", lambda pid: fake_bridge)
+
+    resp = api_client.get(
+        "/projects/app/search?q=checkout&limit=5", headers=_auth_headers()
+    )
+    assert resp.status_code == 200
+    assert resp.json()["results"] == [{"name": "checkout", "limit": 5}]
 
 
 def test_project_detail_unknown_is_404(api_client):

@@ -138,6 +138,14 @@ class TrellisClient:
         """Get the impact graph for a symbol."""
         return self._request("GET", f"/graph/{project_id}/impact/{symbol}")
 
+    def search(self, project_id: str, query: str, limit: int = 10) -> Any:
+        """Keyword/semantic code search over a project (functions, classes)."""
+        return self._request(
+            "GET",
+            f"/projects/{project_id}/search",
+            params={"q": query, "limit": limit},
+        )
+
     def feature_impact(self, project_id: str, symbol: str) -> Any:
         """Get the feature impact report for a symbol."""
         return self._request("GET", f"/feature/{project_id}/impact/{symbol}")

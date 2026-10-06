@@ -42,6 +42,18 @@ def create_api_app(version: str) -> FastAPI:
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    @app.get("/projects/{project_id}/search")
+    async def project_search(project_id: str, q: str = "", limit: int = 10):
+        """Keyword/semantic code search over one project (REST equivalent of
+        the trellis_search_code MCP tool; falls back to full-text search when
+        the index has no embeddings)."""
+        try:
+            bridge = core.get_bridge(project_id)
+            results = await asyncio.to_thread(bridge.search, q, limit=limit)
+            return JSONResponse({"results": results})
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     @app.post("/graph/{project_id}/sync")
     async def graph_sync(project_id: str):
         """Full index rebuild. Heavy — edits are otherwise indexed automatically
