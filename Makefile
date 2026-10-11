@@ -1,5 +1,5 @@
 # Trellis Core - Makefile
-.PHONY: install dev trellis-dev-vscode mcp-config run run-http run-api run-ui test lint format clean check
+.PHONY: install dev trellis-dev-vscode mcp-config run run-http run-api run-ui engine-release test lint format clean check
 
 PYTHON ?= python
 VENV := .venv
@@ -66,6 +66,10 @@ ifeq ($(OS),Windows_NT)
 else
 	TRELLIS_HOST=127.0.0.1 TRELLIS_PORT=17317 $(PYTHON_VENV) server.py ui
 endif
+
+engine-release:
+	@echo "Building + publishing linux engine assets for the current version tag..."
+	$(PYTHON_VENV) scripts/build_engine_assets.py --publish
 
 check:
 	curl -sSf http://localhost:17317/health -o nul 2>&1 || echo Health check failed

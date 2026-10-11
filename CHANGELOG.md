@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+- Added `scripts/build_engine_assets.py`: builds the code-graph-mcp engine
+  for linux/amd64 + linux/arm64 via cargo-in-Docker (rust:1-bookworm, fast
+  no-LTO profile) and publishes `code-graph-mcp-linux-amd64`,
+  `code-graph-mcp-linux-arm64`, and `checksums.sha256` as assets on the
+  GitHub release for the current version tag (`make engine-release`).
+  Downstream docker consumers can download prebuilt engines instead of
+  compiling Rust on install.
+- `trellis_sync` is no longer an MCP tool by default (operator-only; index
+  via the `trellis sync` CLI, monitor via `trellis_sync_status`). Opt in with
+  `TRELLIS_ENABLE_MCP_SYNC=1`. Skill and server instructions updated to match.
+
 ## v0.4.0 — 2026-10-06
 
 Service-oriented release: Trellis splits into independently-startable
