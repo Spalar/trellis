@@ -268,6 +268,12 @@ class SecurityScanner:
             "Error message pointing to Rust install docs; no actual request made",
         ),
         (
+            r"https://github\.com/(Spalar/trellis|\{REPO_SLUG\})/releases/download/",
+            "Hardcoded HTTP(S) URL",
+            "build_engine_assets.py prints the release asset download URL for the "
+            "maintainer; no HTTP request is made by Trellis",
+        ),
+        (
             r"127\.0\.0\.1:17317/mcp",
             "Hardcoded HTTP(S) URL",
             "Loopback default URL emitted into user-generated MCP client configs; Trellis never requests it",
