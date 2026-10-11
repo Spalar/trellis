@@ -175,7 +175,9 @@ def write_checksums() -> dict[str, str]:
     """Write checksums.sha256 (relative filenames) and return {asset: sha256}."""
     hashes = {name: sha256_of(OUT_DIR / name) for name in ASSETS}
     lines = [f"{hashes[name]}  {name}" for name in ASSETS]
-    (OUT_DIR / CHECKSUMS_FILE).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # newline="\n": LF-only — sha256sum -c rejects CRLF lines on Linux consumers.
+    with open(OUT_DIR / CHECKSUMS_FILE, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\n".join(lines) + "\n")
     return hashes
 
 
