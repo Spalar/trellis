@@ -14,7 +14,7 @@ Use Trellis tools to analyze codebases and manage linkable documentation. Trelli
 You can still use Trellis effectively — the MCP server bootstraps you:
 1. This server's MCP `instructions` (sent at connect) contain the essential getting-started workflow — read them first.
 2. Read the resource `trellis://skill` to fetch the full content of this skill document, then follow it.
-3. Then start with Phase 1 below (`trellis_sync` + `trellis_list_modules`).
+3. Then start with Phase 1 below (`trellis_sync_status` + `trellis_list_modules`).
 
 To install the skill permanently, copy the `trellis-mcp` skill folder (bundled with the Trellis release/repo under `skills/`) into your agent's skills directory.
 
@@ -37,7 +37,7 @@ To install the skill permanently, copy the `trellis-mcp` skill folder (bundled w
 
 ## Project.md (Feature Specification) — MANDATORY
 
-Trellis reads `project.md` in your **repo root** to understand feature boundaries. **If `project.md` is missing, you MUST create it before continuing with feature-level work.** Feature tools (`trellis_feature_info`, `trellis_trace_path`, feature impacts in `trellis_analyze_impact`) are driven entirely by this file — without it, functions are reported as "not mapped to any feature". Every `trellis_sync` response includes a `project_md` field (`ok` or `missing` + instructions); treat `missing` as your next mandatory step.
+Trellis reads `project.md` in your **repo root** to understand feature boundaries. **If `project.md` is missing, you MUST create it before continuing with feature-level work.** Feature tools (`trellis_feature_info`, `trellis_trace_path`, feature impacts in `trellis_analyze_impact`) are driven entirely by this file — without it, functions are reported as "not mapped to any feature". `trellis_sync_status` includes a `project_md` field (`ok` or `missing` + instructions); treat `missing` as your next mandatory step.
 
 ### The exact format Trellis parses
 
@@ -75,18 +75,18 @@ Flexibility — project.md is also your project document:
 
 ### What to do with it (workflow)
 
-1. **After your first `trellis_sync`**: check the `project_md` field. If `missing`, create `project.md` at the repo root now, before any feature-level work.
+1. **Check the project status**: call `trellis_sync_status` and look at the `project_md` field. If `missing`, create `project.md` at the repo root now, before any feature-level work.
 2. **Populate it from discovery output**: derive feature names from `trellis_list_modules` / `trellis_search_code` results; derive `### Files` globs from the file paths those tools return. Start with 3-5 coarse features covering most of the codebase; refine later. `references/ubiquitous-language-template.md` has a fuller template with domain terms.
 3. **Validate**: run `trellis_feature_info(project_id, feature_name="<Name>")` for each feature. If it reports zero functions, your `### Files` globs match nothing — fix the patterns until each feature maps to its files.
-4. **Keep it current**: whenever you add, rename, or significantly change a feature, update its `project.md` section. That's the only file you maintain — Trellis auto-syncs the `feature-<name>` Architecture note from it on every `trellis_sync` and spec save (agent-authored notes without the auto-generated marker are never overwritten). After editing `project.md`, re-run the feature tool that depends on it — the file is re-read on each call, no re-sync needed.
+4. **Keep it current**: whenever you add, rename, or significantly change a feature, update its `project.md` section. That's the only file you maintain — Trellis auto-syncs the `feature-<name>` Architecture note from it on every sync and spec save (agent-authored notes without the auto-generated marker are never overwritten). After editing `project.md`, re-run the feature tool that depends on it — the file is re-read on each call, no re-sync needed.
 
 ## Core Principles
 
 ### 1. Discovery First
 
-Before writing or modifying code, use Trellis to build mental models of the codebase. Sync the repository, list features, and inspect function details. Never write code in a vacuum.
+Before writing or modifying code, use Trellis to build mental models of the codebase. Check that the project is indexed, list features, and inspect function details. Never write code in a vacuum.
 
-**How**: Run `trellis_sync` + `trellis_list_modules` at the start of every session. (`trellis_sync` only builds the index the first time — after that a file watcher keeps the graph in sync with your edits automatically.)
+**How**: Run `trellis_sync_status` + `trellis_list_modules` at the start of every session. (The index is built once by the operator via `trellis sync` — after that a file watcher keeps the graph in sync with your edits automatically.)
 
 ### 2. Analyze Before Changing
 
@@ -117,7 +117,7 @@ Create knowledge notes for key features, decisions, and divergence tracking. Not
 
 Re-analyze after implementing changes to catch unintended side effects. The code graph reflects your edits automatically — the graph server watches the repo and re-indexes changed files — so no re-sync is needed for your own edits.
 
-**How**: Run `trellis_analyze_impact` after changes. (Re-run `trellis_sync` only after large external changes like big git pulls or branch switches, or if results look stale.)
+**How**: Run `trellis_analyze_impact` after changes. (Ask the operator for a re-index — `trellis sync <repo> --incremental` — only after large external changes like big git pulls or branch switches, or if results look stale.)
 
 ## Workflow
 
@@ -125,17 +125,17 @@ Re-analyze after implementing changes to catch unintended side effects. The code
 
 **Goal**: Understand the codebase structure
 
-1. **Sync the repository**:
+1. **Check the project is indexed**:
    ```
-   trellis_sync(project_id="my-project", repo_path="/path/to/repo")
+   trellis_sync_status(project_id="my-project")
    ```
    *When: At the start of every session*
-   *What it does: Indexes the codebase into the code graph*
-   *Check the `project_md` field in the response: if it reports `missing`, creating `project.md` is your next mandatory step (see Project.md section above) before any feature-level work.*
-
-   **⏱ LONG-RUNNING — the first sync of a large repo takes SEVERAL MINUTES (5-15 min). This is normal, not a hang.** Trellis calls run **async** on the server — a long sync won't block your other projects' calls — but each call returns **only when its work finishes** (not fire-and-forget), and calls on the **same project queue one at a time** behind it. **How to run it: invoke `trellis_sync` in background mode** (your harness's `run_in_background` / async tool-call option) **and keep working on other things** — don't sit blocked on it; your harness delivers a **system notification** when the result is ready. Do NOT poll in a loop, interrupt, cancel, or re-issue the call while pending — it is still running server-side, and duplicates only make that project's calls slower (MCP error -32001). **Your harness may have no background/async tool-call option at all (not every harness does) — if so, or if its timeout kills the call:** run the sync out-of-band: `trellis.exe sync <repo_path> --project-id <id>` (same exe your MCP config uses) in a background shell — it prints progress and exits when done; then `trellis_list_modules` returns instantly once the index exists.
-
-   To check whether a sync is still running, finished, or failed, call `trellis_sync_status(project_id=...)` — it reports running/completed/failed plus index size, for both MCP tool syncs and headless CLI syncs. While it says running, keep waiting; do not re-issue `trellis_sync`.
+   *What it returns: Whether the index exists, node/file counts, the `project_md` field (`ok`/`missing`), and any in-progress sync state.*
+   *If there is no index (or the project is unknown): indexing is done by the operator, not by you — `trellis_sync` is not an agent tool. Ask the operator to run:*
+   ```
+   trellis sync /path/to/repo --project-id my-project
+   ```
+   *It prints progress and exits when done (the first sync of a large repo takes SEVERAL MINUTES, 5-15 min — that is normal). Watch it land with `trellis_sync_status`: while it says `running`, keep waiting; when it says `completed`, the index is ready. If `project_md` reports `missing`, creating `project.md` is your next mandatory step (see Project.md section above).*
 
 2. **List features/modules**:
    ```
@@ -221,7 +221,7 @@ Re-analyze after implementing changes to catch unintended side effects. The code
    *When: Making architectural decisions*
    *Note: `tags` is optional, comma-separated string*
 
-4. **Trellis maintains the Architecture note for you**: the `feature-<name>` note (tag `feature`) is auto-generated from your `project.md` section on every `trellis_sync` and spec save. Do NOT hand-create or hand-update it — edit `project.md` instead. Use `trellis_create_note` only for knowledge that does NOT belong in `project.md`: cross-cutting decisions, divergence logs, integration plans.
+4. **Trellis maintains the Architecture note for you**: the `feature-<name>` note (tag `feature`) is auto-generated from your `project.md` section on every sync and spec save. Do NOT hand-create or hand-update it — edit `project.md` instead. Use `trellis_create_note` only for knowledge that does NOT belong in `project.md`: cross-cutting decisions, divergence logs, integration plans.
    *When: Never mandatory. Optional notes are for rationale and plans beyond the spec.*
    *Why: One source of truth. Hand-duplicated architecture notes drift out of sync with project.md; generated ones can't.*
 
@@ -229,19 +229,15 @@ Re-analyze after implementing changes to catch unintended side effects. The code
 
 **Goal**: Confirm no unintended side effects
 
-1. **Re-sync**:
-   ```
-   trellis_sync(project_id="my-project")
-   ```
-   *When: After implementing changes*
+*The code graph reflects your edits automatically — the file watcher re-indexes changed files — so no re-sync step is needed for your own edits.*
 
-2. **Re-analyze**:
+1. **Re-analyze**:
    ```
    trellis_analyze_impact(project_id="my-project", function_path="authenticate_user")
    ```
    *When: Verifying changes are safe*
 
-3. **Analyze the functions you changed**:
+2. **Analyze the functions you changed**:
    ```
    trellis_analyze_impact(project_id="my-project", function_path="<changed_function>")
    ```
@@ -254,8 +250,7 @@ Re-analyze after implementing changes to catch unintended side effects. The code
 
 | Tool | Parameters | Returns | When to Use |
 |------|-----------|---------|-------------|
-| `trellis_sync` | `project_id`, `repo_path`, `config_path`, `incremental` | Status, node count, file count | Once per project; again only after large pulls or stale results (the server file-watcher keeps the graph fresh). ⚠ First sync takes SEVERAL MINUTES — call once, wait for completion, never retry (see Phase 1) |
-| `trellis_sync_status` | `project_id` | Sync state (running/completed/failed), index size, guidance | Check sync progress — including for headless `trellis.exe sync` runs; while it says running, keep waiting |
+| `trellis_sync_status` | `project_id` | Index existence, node/file counts, `project_md` status, sync state (running/completed/failed), guidance | Start of every session; check whether the operator's `trellis sync` has finished — while it says running, keep waiting |
 | `trellis_list_modules` | `project_id` | List of directories with symbol counts | Understand structure |
 | `trellis_search_code` | `project_id`, `query`, `limit` | Matching functions/classes with paths | Find code by keyword |
 | `trellis_ast_search` | `project_id`, `query`, `node_type`, `returns`, `params`, `limit` | Matching symbols filtered by structure/signature | Find code by type, return type, or params (e.g. all `class` nodes) |
@@ -284,7 +279,7 @@ Re-analyze after implementing changes to catch unintended side effects. The code
 
 **`trellis_knowledge_graph` defaults to notes only.** Passing `include_code=True` adds every function in the project as a node — expensive in tokens. Note contents in graph nodes are truncated; use `trellis_get_note` for full content.
 
-### Analysis Tools (2 tools)
+### Analysis Tools (1 tool + 1 opt-in)
 
 | Tool | Parameters | Returns | When to Use |
 |------|-----------|---------|-------------|
@@ -352,8 +347,9 @@ Re-analyze after implementing changes to catch unintended side effects. The code
 
 ```
 Starting a new task?
-  → Run: trellis_sync + trellis_list_modules
-  → If sync reports project_md missing: CREATE project.md first (mandatory)
+  → Check: trellis_sync_status + run trellis_list_modules
+  → If there is no index: ask the operator to `trellis sync` the repo
+  → If project_md is missing: CREATE project.md first (mandatory)
 
 About to change code?
   → Phase 2: Strategy
@@ -423,7 +419,7 @@ Looking for documentation?
 
 ### Pattern: Onboarding to New Codebase
 
-1. `trellis_sync` - Index the repo
+1. Ask the operator to index the repo (`trellis sync /path/to/repo --project-id <id>`), then confirm with `trellis_sync_status`
 2. `trellis_tour` - Dependency-ordered reading list (foundational modules first)
 3. `trellis_list_modules` - See high-level directory structure
 4. `trellis_search_code` - Find entry points
@@ -507,31 +503,31 @@ Read the relevant reference file before Phase 2 (Strategy) of the workflow.
 - Preferred alternative: run `trellis_analyze_impact` on each function you changed.
 
 ### Sync returns 0 nodes or 0 files
-- Check that `repo_path` exists and is the repo root (not a subfolder).
-- Verify the Trellis MCP server is running and listed in your agent's MCP config.
-- Run `trellis_sync` without `incremental` to force a full rebuild.
+- `trellis sync` is a CLI command run by the operator, not an MCP tool. Re-run it without `--incremental` to force a full rebuild.
+- Check that the repo path exists and is the repo root (not a subfolder).
 - Ensure the repo contains parseable source files (not just binary assets).
+- After it completes, confirm with `trellis_sync_status`.
 
 ### MCP server is not running
 - If tool calls fail immediately with a connection error, the `trellis-core` MCP server process is not running or is not reachable on the configured port.
 - Restart your agent/IDE; the server should start automatically if configured in `opencode.jsonc` or equivalent MCP settings.
 
 ### Edges seem stale or callers are missing
-- The code graph can be wiped by background indexing. Re-run `trellis_sync` after any unexpected results.
-- Re-run `trellis_analyze_impact` after re-syncing to refresh affected-function counts.
+- The code graph can be wiped by background indexing. Ask the operator to re-run `trellis sync` after any unexpected results.
+- Re-run `trellis_analyze_impact` after re-indexing to refresh affected-function counts.
 
 ### Project ID naming
 - `project_id` is arbitrary but must be consistent across calls for the same repo.
 - Trellis stores the index under `TRELLIS_DATA_DIR/projects/{project_id}/`. Use a short, stable identifier such as `tui-image-editor` or `my-service`.
 
 ### Windows paths
-- On Windows, pass paths as forward slashes or double-quoted backslashes: `K:\repos\trellis` or `K:/repos/trellis`.
+- On Windows, pass paths as forward slashes or double-quoted backslashes: `C:\path\to\your-project` or `C:/path/to/your-project`.
 - Always quote backslash paths in JSON/MCP config to avoid escape-sequence issues.
 
 ## Best Practices
 
-1. **Sync once per project**: Run `trellis_sync` when you first work on a project; after that the server file-watcher keeps the graph fresh automatically
-2. **project.md is mandatory**: If sync reports it missing, create it before feature-level work
+1. **One index per project**: the operator indexes a project once with `trellis sync`; after that the server file-watcher keeps the graph fresh automatically
+2. **project.md is mandatory**: If `trellis_sync_status` reports it missing, create it before feature-level work
 3. **Analyze before changing**: Never modify code without running `trellis_analyze_impact`
 4. **Document decisions**: Record decisions in the feature's `### Decisions` section in `project.md`; use `trellis_create_note` only for rationale and plans that don't belong in the spec
 5. **Maintain project.md, not notes**: Update the feature's `project.md` section when you change it — Trellis auto-syncs its `feature-<name>` note; never hand-edit that note
@@ -540,4 +536,4 @@ Read the relevant reference file before Phase 2 (Strategy) of the workflow.
 8. **Use specific paths**: Reference functions by name from Trellis output
 9. **Link everything**: Use `[[Note]]` and `@Function` to connect docs and code
 10. **Read references**: Check `references/impact-analysis.md` before complex changes
-11. **Re-sync only as a last resort**: Custom call edges wiped by re-indexing are restored automatically within a minute; if impact analysis still returns 0 callers unexpectedly after that, run `trellis_sync` for a full rebuild
+11. **Re-index only as a last resort**: Custom call edges wiped by re-indexing are restored automatically within a minute; if impact analysis still returns 0 callers unexpectedly after that, ask the operator to re-run `trellis sync` for a full rebuild

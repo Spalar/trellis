@@ -302,7 +302,7 @@ trellis_sync(project_id="my-project")
 
 A standalone evaluation utility lives in `eval/` (gitignored, local-only). It runs a proxy + web UI for manually testing token usage, recall speed, and blast radius with the `tui.image-editor` scenarios.
 
-The `tui-image-editor-fixture/` directory inside this repo is a test fixture used only by Trellis tests; it is not the repo the agent should edit during evaluation. The real repo is `K:\repos\tui.image-editor` (or wherever you cloned it).
+The `tui-image-editor-fixture/` directory inside this repo is a test fixture used only by Trellis tests; it is not the repo the agent should edit during evaluation. The real repo is wherever you cloned `tui.image-editor` (e.g. `~/repos/tui.image-editor`).
 
 ```bash
 cd eval

@@ -442,8 +442,8 @@ def resolve_project_path(project_id: str, allow_unregistered: bool = False) -> s
         # would resolve it against the server CWD and create a phantom
         # <cwd>/<id>/.code-graph directory plus a garbage registry entry.
         hint = (
-            f'Register it first: trellis_sync(project_id="{project_id}", '
-            'repo_path="<repo root>")'
+            f'Index it first: trellis sync <repo root> --project-id "{project_id}" '
+            "(headless CLI, run by the operator; trellis_sync is not an agent tool)"
         )
         close = difflib.get_close_matches(
             project_id, list_registered_projects().keys(), n=3, cutoff=0.5
@@ -578,6 +578,7 @@ def project_sync_summary(project_id: str) -> dict:
         "index_exists": index_exists,
         "nodes": nodes,
         "files": files,
+        "project_md": project_md_status(repo),
         "sync": job,
         "guidance": sync_guidance(job, index_exists),
     }

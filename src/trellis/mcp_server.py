@@ -30,6 +30,17 @@ DIFF_ANALYSIS_ENABLED = os.environ.get("TRELLIS_ENABLE_DIFF_ANALYSIS", "").lower
     "yes",
     "on",
 )
+
+# trellis_sync is operator-only by default: a first index takes 5-15 minutes
+# and hammers the repo, so agents shouldn't trigger it. Indexing happens via
+# the headless CLI (`trellis sync`); agents monitor with trellis_sync_status.
+# Opt back in with TRELLIS_ENABLE_MCP_SYNC=1.
+SYNC_TOOL_ENABLED = os.environ.get("TRELLIS_ENABLE_MCP_SYNC", "").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 MAX_DIFF_CHARS = int(os.environ.get("TRELLIS_MAX_DIFF_CHARS", "200000"))
 MAX_DIFF_FILES = int(os.environ.get("TRELLIS_MAX_DIFF_FILES", "50"))
 MAX_DIFF_FUNCTIONS = int(os.environ.get("TRELLIS_MAX_DIFF_FUNCTIONS", "25"))
@@ -38,19 +49,16 @@ _SERVER_INSTRUCTIONS = """\
 Trellis: graph-based code analysis and knowledge management for this workspace.
 
 Getting started:
-1. Sync once per project: trellis_sync(project_id="<repo name or path>", repo_path="<repo root path>"). Check the project_md field in the response. The index then stays fresh automatically — the graph server watches the repo and re-indexes edited files on its own.
-2. If project_md is "missing", create <repo root>/project.md BEFORE any feature-level work. Format (parsed strictly): one "## Feature: <Name>" section per feature, containing a plain-text description paragraph, then "### Decisions" ("- DEC-001: decision (because: rationale)" with nested "- Constraint: ..."), "### Files" (glob patterns, one per line, e.g. src/auth/**), and "### Dependencies" ("- Feature: <Other Feature>"). Other layouts (tables, "- **Description**:" bullets) are ignored.
+1. Projects are indexed by the operator, not by you: trellis_sync is not exposed as a tool. Before working on a project, call trellis_sync_status(project_id=...). If there is no index yet, ask the operator to index it: `trellis sync <repo_path> --project-id <id>` (headless CLI). The index then stays fresh automatically — the graph server watches the repo and re-indexes edited files on its own. Re-indexing is needed only after large external changes (big pulls, branch switches).
+2. Check the project_md status (trellis_sync_status reports it). If "missing", create <repo root>/project.md BEFORE any feature-level work. Format (parsed strictly): one "## Feature: <Name>" section per feature, containing a plain-text description paragraph, then "### Decisions" ("- DEC-001: decision (because: rationale)" with nested "- Constraint: ..."), "### Files" (glob patterns, one per line, e.g. src/auth/**), and "### Dependencies" ("- Feature: <Other Feature>"). Other layouts (tables, "- **Description**:" bullets) are ignored.
 3. Explore with trellis_list_modules and trellis_search_code; inspect symbols with trellis_get_function; understand features with trellis_feature_info.
-4. Before modifying any function, run trellis_analyze_impact on it. The graph reflects your edits automatically — just re-analyze. Run trellis_sync again only after large external changes (big pulls, branch switches) or if results look stale.
+4. Before modifying any function, run trellis_analyze_impact on it. The graph reflects your edits automatically — just re-analyze.
 5. Document decisions and feature architecture with trellis_create_note (wiki links [[Note]], code mentions @function).
 
-Long-running calls — read before running trellis_sync:
-- Tool calls run ASYNC on the server: a long call won't block other projects' trellis calls, but each call returns ONLY when its work is done (not fire-and-forget), and calls on the SAME project queue one at a time.
-- The FIRST trellis_sync of a project rebuilds the whole index and takes SEVERAL MINUTES (5-15 min for large repos). That is normal, not a hang.
-- HOW TO RUN IT: invoke trellis_sync in BACKGROUND mode and keep working on other things — do not sit blocked on this call and do not let it stall the rest of your task. Use your harness's background/async tool-call option (e.g. run_in_background=true); the harness sends a system notification when the result is ready, and you pick it up then. NEVER poll in a loop, interrupt, cancel, or re-issue the call while it is pending — it is still running server-side, and duplicates queue behind it and only make that project's calls slower (MCP error -32001). Note: not every harness HAS a background/async tool-call option — if yours doesn't (or its timeout kills the call), run the sync out-of-band instead: `trellis.exe sync <repo_path> --project-id <id>` (the same exe your MCP config launches) in a background shell — it prints progress and exits when done; then continue with trellis_list_modules.
-- To check whether a sync is still running, finished, or failed, call trellis_sync_status(project_id=...) — it reports running/completed/failed plus index size, for both MCP tool syncs and headless CLI syncs. While it says running, keep waiting; do not re-issue trellis_sync.
-- While a sync runs, other calls on the same project may be slow or time out; calls on other projects keep working.
-- Analysis tools on very large projects (trellis_get_graph, trellis_tour, trellis_project_health) can also take a minute or more — same rules: background mode + notification.
+Long-running calls:
+- Tool calls run ASYNC on the server: a long call won't block other projects' trellis calls, but each call returns ONLY when its work is done, and calls on the SAME project queue one at a time.
+- Analysis tools on very large projects (trellis_get_graph, trellis_tour, trellis_project_health) can take a minute or more — run them in BACKGROUND mode (your harness's run_in_background/async option) and keep working; the harness notifies you when the result is ready. Never poll in a loop, interrupt, cancel, or re-issue a pending call — it is still running server-side, and duplicates queue behind it (MCP error -32001).
+- If a call fails with "not indexed" or an empty graph, the project has no index: ask the operator to run `trellis sync` (see step 1) and check trellis_sync_status until it reports completed.
 
 The full skill document — complete workflow, project.md template, and tool reference — is available as the MCP resource "trellis://skill". Fetch it if the trellis-mcp skill is not installed in your agent.
 """
@@ -58,16 +66,16 @@ The full skill document — complete workflow, project.md template, and tool ref
 _SKILL_FALLBACK = """\
 # Trellis MCP — Getting Started (bundled fallback)
 
-1. Run trellis_sync(project_id="<repo name>", repo_path="<repo root>") and check the project_md field.
+1. Projects are indexed by the operator (trellis_sync is not a tool here). Check trellis_sync_status(project_id=...) first; if there is no index, ask the operator to run `trellis sync <repo_path> --project-id <id>` and wait for trellis_sync_status to report completed.
 2. If project_md is "missing", create <repo root>/project.md before feature-level work:
    one "## Feature: <Name>" section per feature with a plain-text description,
    "### Decisions" (- DEC-001: text (because: rationale)), "### Files" (glob patterns,
    one per line), "### Dependencies" (- Feature: <Name>).
 3. Explore: trellis_list_modules, trellis_search_code, trellis_get_function, trellis_feature_info.
-4. Before changing code: trellis_analyze_impact. The graph re-indexes edits automatically (file watcher) — just re-analyze; re-run trellis_sync only after large pulls or if results look stale.
+4. Before changing code: trellis_analyze_impact. The graph re-indexes edits automatically (file watcher) — just re-analyze.
 5. Document with trellis_create_note ([[wiki links]] and @code mentions).
 
-Long-running calls: calls run ASYNC on the server (a long call won't block other projects), but each returns only when its work finishes — never fire-and-forget. The FIRST trellis_sync of a project takes SEVERAL MINUTES (5-15 min) — that is normal. Run it in BACKGROUND mode (your harness's run_in_background/async option), keep working on other things, and act on the system notification when the result arrives. Never poll in a loop, interrupt, cancel, or re-issue a pending call — it is still running server-side, and duplicates only make that project's calls slower (MCP error -32001). Not every harness has a background mode: if yours doesn't, run `trellis.exe sync <repo_path> --project-id <id>` in a background shell instead. To check whether a sync is still running, finished, or failed, call trellis_sync_status(project_id=...) — it works for both MCP and CLI syncs; while it says running, keep waiting. Calls on the same project queue one at a time.
+Long-running calls: calls run ASYNC on the server (a long call won't block other projects), but each returns only when its work finishes — never fire-and-forget. Big analysis calls (trellis_get_graph, trellis_tour, trellis_project_health) can take a minute or more: run them in BACKGROUND mode, keep working, and act on the notification. Never poll, interrupt, or re-issue a pending call (MCP error -32001). If a project has no index, ask the operator to `trellis sync` it; monitor with trellis_sync_status.
 
 Install the trellis-mcp skill (skills/ folder in the Trellis distribution) for the full workflow.
 """
@@ -164,7 +172,9 @@ def create_mcp_server(version: str) -> FastMCP:
     # MCP Tools
     # ------------------------------------------------------------------
 
-    @mcp.tool()
+    # trellis_sync is operator-only by default (SYNC_TOOL_ENABLED): a first
+    # index takes 5-15 minutes, so agents must not trigger it — the operator
+    # indexes via `trellis sync` and agents watch trellis_sync_status.
     async def trellis_sync(
         project_id: str = "",
         repo_path: str = "",
@@ -295,6 +305,9 @@ def create_mcp_server(version: str) -> FastMCP:
                 job["finished_at"] = _now_iso()
                 job["detail"] = "sync handler cancelled (client timeout or interrupt)"
                 _set_sync_job(job_key, job)
+
+    if SYNC_TOOL_ENABLED:
+        mcp.tool()(trellis_sync)
 
     @mcp.tool()
     async def trellis_sync_status(

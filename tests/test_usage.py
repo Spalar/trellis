@@ -115,3 +115,35 @@ def test_mcp_tool_call_recorded_through_server(data_dir):
     assert entry["tool"] == "trellis_sync_status"
     assert entry["ok"] is True
     assert entry["duration_ms"] >= 0
+
+
+def test_sync_tool_registration_gating(monkeypatch):
+    """trellis_sync is operator-only: absent by default, present with the env."""
+    import anyio
+
+    from fastmcp import Client
+    from src.trellis.mcp_server import create_mcp_server
+
+    async def _names(mcp):
+        async with Client(mcp) as client:
+            return sorted(t.name for t in await client.list_tools())
+
+    mcp = create_mcp_server("0.0.0-test")
+    names = anyio.run(_names, mcp)
+    assert "trellis_sync" not in names
+    assert "trellis_sync_status" in names
+
+    monkeypatch.setenv("TRELLIS_ENABLE_MCP_SYNC", "1")
+    import importlib
+
+    import src.trellis.mcp_server as mcp_server
+
+    importlib.reload(mcp_server)
+    try:
+        mcp2 = mcp_server.create_mcp_server("0.0.0-test")
+        names2 = anyio.run(_names, mcp2)
+        assert "trellis_sync" in names2
+        assert "trellis_sync_status" in names2
+    finally:
+        monkeypatch.undo()
+        importlib.reload(mcp_server)

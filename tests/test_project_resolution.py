@@ -60,21 +60,21 @@ def test_unregistered_falls_back_to_heuristics(monkeypatch, tmp_path):
 def test_unknown_id_suggests_close_registered_project(monkeypatch, tmp_path):
     """An unknown id close to a registered one gets a did-you-mean hint plus
     the registration instruction."""
-    repo = tmp_path / "repos" / "desfut_vuegen"
+    repo = tmp_path / "repos" / "sample_project"
     repo.mkdir(parents=True)
     cwd = tmp_path / "elsewhere"
     cwd.mkdir()
-    _patch_registry(monkeypatch, {"desfut_vuegen": str(repo)})
+    _patch_registry(monkeypatch, {"sample_project": str(repo)})
     monkeypatch.chdir(cwd)
 
     import pytest
 
     with pytest.raises(ValueError) as exc_info:
-        server._resolve_project_path("desfut-vuegen")
+        server._resolve_project_path("sample-project")
     message = str(exc_info.value)
-    assert "Unknown project 'desfut-vuegen'" in message
-    assert "Did you mean: desfut_vuegen" in message
-    assert 'trellis_sync(project_id="desfut-vuegen"' in message
+    assert "Unknown project 'sample-project'" in message
+    assert "Did you mean: sample_project" in message
+    assert 'trellis sync' in message and "--project-id" in message
 
 
 def test_unknown_id_without_close_match_has_register_hint(monkeypatch, tmp_path):
@@ -90,7 +90,7 @@ def test_unknown_id_without_close_match_has_register_hint(monkeypatch, tmp_path)
         server._resolve_project_path("zzz-no-such-project")
     message = str(exc_info.value)
     assert "Did you mean" not in message
-    assert "Register it first" in message
+    assert "Index it first" in message
 
 
 def test_registered_stale_path_falls_through(monkeypatch, tmp_path):
@@ -116,15 +116,15 @@ def test_register_project_maps_agent_project_id(monkeypatch, tmp_path):
     from src.trellis.utils import list_registered_projects, register_project
 
     monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path))
-    repo = tmp_path / "repos" / "desfut_vuegen"
+    repo = tmp_path / "repos" / "sample_project"
     repo.mkdir(parents=True)
 
-    register_project("desfut-vuegen", repo)
+    register_project("sample-project", repo)
 
     registered = list_registered_projects()
-    assert registered["desfut-vuegen"] == str(repo.resolve())
+    assert registered["sample-project"] == str(repo.resolve())
     # Basename key also usable (resolves to the same repo).
-    assert Path(registered["desfut-vuegen"]) == repo.resolve()
+    assert Path(registered["sample-project"]) == repo.resolve()
 
 
 def test_register_project_sanitizes_path_like_and_empty_ids(monkeypatch, tmp_path):
@@ -132,18 +132,18 @@ def test_register_project_sanitizes_path_like_and_empty_ids(monkeypatch, tmp_pat
     from src.trellis.utils import list_registered_projects, register_project
 
     monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path))
-    repo = tmp_path / "repos" / "desfut_vuegen"
+    repo = tmp_path / "repos" / "sample_project"
     repo.mkdir(parents=True)
 
     register_project("", repo)
     register_project("  ", repo)
     register_project("some/path", repo)
     register_project(r"some\path", repo)
-    register_project("K:/repos/other", repo)
+    register_project("X:/storage/other", repo)
 
     registered = list_registered_projects()
-    assert set(registered) == {"desfut_vuegen"}
-    assert registered["desfut_vuegen"] == str(repo.resolve())
+    assert set(registered) == {"sample_project"}
+    assert registered["sample_project"] == str(repo.resolve())
 
 
 def test_record_project_skips_mei_dirs(monkeypatch, tmp_path):
@@ -211,7 +211,7 @@ def test_sync_status_write_skipped_for_unsanitizable_ids(monkeypatch, tmp_path):
     monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path))
 
     status = {"state": "running"}
-    for bad_id in ("", "  ", "some/path", r"some\path", "K:/repos/x"):
+    for bad_id in ("", "  ", "some/path", r"some\path", "X:/storage/x"):
         write_sync_status(bad_id, status)
     assert not (tmp_path / "projects").exists()
     assert read_sync_status("some/path") is None
