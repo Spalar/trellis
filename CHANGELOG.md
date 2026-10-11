@@ -1,23 +1,6 @@
 # Changelog
 
-## Unreleased
-- Added `scripts/build_engine_assets.py`: builds the code-graph-mcp engine
-  for linux/amd64 + linux/arm64 via cargo-in-Docker (rust:1-bookworm, fast
-  no-LTO profile) and publishes `code-graph-mcp-linux-amd64`,
-  `code-graph-mcp-linux-arm64`, and `checksums.sha256` as assets on the
-  GitHub release for the current version tag (`make engine-release`).
-  Downstream docker consumers can download prebuilt engines instead of
-  compiling Rust on install.
-- `trellis_sync` is no longer an MCP tool by default (operator-only; index
-  via the `trellis sync` CLI, monitor via `trellis_sync_status`). Opt in with
-  `TRELLIS_ENABLE_MCP_SYNC=1`. Skill and server instructions updated to match.
-
-## v0.4.0 — 2026-10-06
-
-Service-oriented release: Trellis splits into independently-startable
-components, gains a REST integration surface with a Python SDK and Docker
-sidecar, ships a hardened network mode, and upgrades the analysis engine
-from 0.156.0 to 0.164.0.
+## v0.4.1 — 2026-10-11
 
 ### Added
 - **3-way component split** — `trellis [mcp|api|ui|sync]` subcommands; each
@@ -47,6 +30,11 @@ from 0.156.0 to 0.164.0.
   import/decorator/`@overload` fixes, JS/TS member-function nodes,
   route→handler cross-file tracing, running-server index integrity, CLI
   `impact`/`callgraph --node-id`, `fts_only` reporting.
+- `scripts/build_engine_assets.py` + `make engine-release` — builds
+  linux/amd64 + linux/arm64 engine binaries in Docker and attaches them
+  (plus `checksums.sha256`) to the GitHub release for downstream docker
+  consumers (Windows-only consumers can ignore this; the Windows zip
+  bundles the engine exe).
 
 ### Security
 - **Closed token leak on network binds** — `/` previously served the
@@ -63,14 +51,22 @@ from 0.156.0 to 0.164.0.
 - Security scan passes clean; `cargo audit` clean.
 
 ### Changed
-- `server.py` is now a thin CLI dispatcher; code moved to
-  `src/trellis/{core,mcp_server,api,ui}.py`. All 20 MCP tools unchanged.
+- **`trellis_sync` is no longer an MCP tool** (operator-only; index via the
+  `trellis sync` CLI, monitor via `trellis_sync_status`). Opt in with
+  `TRELLIS_ENABLE_MCP_SYNC=1`. Server instructions, bundled fallback, and
+  the skill document updated to match; `trellis_sync_status` now also
+  reports the `project_md` status so agents can still discover the
+  mandatory project.md step.
+- `server.py` is a thin CLI dispatcher; code lives in
+  `src/trellis/{core,mcp_server,api,ui}.py`. The 20 remaining MCP tools are
+  unchanged.
 - **Impact risk for no-caller symbols is now `unknown`** (engine behavior;
   previously `low`). UI/clients parsing `risk_level` see the new value.
 - **One-time full re-index** on first query after upgrade (engine index
   schema 72 → 113); slower first call per project, then normal.
 - `visualizer.html` uses same-origin API by default; `?api=<url>` override.
 - Project registry data now also stores usage stats (`usage.json`).
+- Pydantic floor raised to `>=2.10.0`.
 
 ### Removed
 - `start_server.py` (stale dev launcher — use `trellis ui`/`trellis api`).
@@ -80,23 +76,25 @@ from 0.156.0 to 0.164.0.
 ### Breaking changes (read before upgrading)
 1. **`start_server.py` is gone.** Deployments using it must switch to
    `trellis ui` (same port, same behavior).
-2. **`TRELLIS_ALLOW_NO_AUTH` now actually disables the token check** on
+2. **`trellis_sync` is no longer an MCP tool.** Agents must not be told to
+   call it; indexing is the operator's job (`trellis sync` CLI). Enable
+   `TRELLIS_ENABLE_MCP_SYNC=1` to restore the old behavior.
+3. **`TRELLIS_ALLOW_NO_AUTH` now actually disables the token check** on
    loopback binds. Dev setups relying on the old (accidental) enforcement
    should set an explicit `TRELLIS_API_KEY`.
-3. **UI on a network bind requires credentials** — open it as
+4. **UI on a network bind requires credentials** — open it as
    `/?token=<key>`; plain `/` returns 401. Loopback UIs are unchanged.
-4. **`risk_level` may be `"unknown"`** where it was `"low"` (engine).
-5. **First query per indexed project triggers a full rebuild** after the
+5. **`risk_level` may be `"unknown"`** where it was `"low"` (engine).
+6. **First query per indexed project triggers a full rebuild** after the
    engine upgrade; expect a slow first call (minutes for large repos).
-6. `GET /projects` response shape enriched (added `index_exists`, `nodes`,
+7. `GET /projects` response shape enriched (added `index_exists`, `nodes`,
    `files`, `sync` fields); clients should tolerate new fields.
 
 ### Artifacts
-- `out/trellis-v0.4.0-windows-amd64.zip` (109.5 MB, includes the REST search
-  endpoint from commit `2c0a4ef`).
+- `out/trellis-v0.4.1-windows-amd64.zip` (engine exe bundled inside).
 
 ---
 
 ## v0.3.0 and earlier
 
-See `git log` (no changelog was maintained before v0.4.0).
+See `git log` (no changelog was maintained before v0.4.1).
