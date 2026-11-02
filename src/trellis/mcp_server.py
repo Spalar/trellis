@@ -120,11 +120,89 @@ class _UsageRecordingMiddleware(Middleware):
             raise
         finally:
             try:
-                usage.record_call(
-                    name, project_id, ok, (time.perf_counter() - start) * 1000
+                # File I/O: keep it off the event loop.
+                await asyncio.to_thread(
+                    usage.record_call,
+                    name,
+                    project_id,
+                    ok,
+                    (time.perf_counter() - start) * 1000,
                 )
             except Exception:
                 pass
+
+
+
+def _trace_path(bridge, db_path, from_feature: str, to_feature: str) -> Dict[str, Any]:
+    """Call/import edges between two features or module paths (runs in a thread).
+
+    File sets go into temp tables, so large features don't hit SQLite's
+    bound-parameter limit. Upstream 'ambiguous' by-name edges are left out.
+    """
+    import sqlite3
+    from contextlib import closing
+
+    from src.trellis.feature_impact import ProjectContextParser
+    from src.trellis.graph_queries import confident_filter
+
+    context = ProjectContextParser(str(bridge.project_path))
+    with closing(sqlite3.connect(str(db_path), timeout=10)) as conn:
+        all_paths = [row[0] for row in conn.execute("SELECT path FROM files")]
+
+        def files_for(name):
+            """Files of a project.md feature, else paths containing `name`."""
+            if name in context.features:
+                return set(context.files_for_feature(name, all_paths))
+            needle = name.lower()
+            return {path for path in all_paths if needle in path.lower()}
+
+        from_files, to_files = files_for(from_feature), files_for(to_feature)
+        if not from_files or not to_files:
+            missing = from_feature if not from_files else to_feature
+            return {"error": f"Feature/module '{missing}' not found"}
+
+        for table, paths in (("t_from", from_files), ("t_to", to_files)):
+            conn.execute(f"CREATE TEMP TABLE {table} (path TEXT PRIMARY KEY)")
+            conn.executemany(f"INSERT INTO {table} VALUES (?)", ((p,) for p in paths))
+        confident = confident_filter(conn)
+
+        def edges(where: str, limit: int) -> List[Dict[str, str]]:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT sf.path, tf.path, s.name, e.relation
+                FROM edges e
+                JOIN nodes s ON e.source_id = s.id
+                JOIN nodes t ON e.target_id = t.id
+                JOIN files sf ON s.file_id = sf.id
+                JOIN files tf ON t.file_id = tf.id
+                WHERE e.relation IN ('calls', 'imports') {confident} AND {where}
+                LIMIT {limit}
+                """
+            )
+            return [
+                {"from_file": r[0], "to_file": r[1], "symbol": r[2], "relation": r[3]}
+                for r in rows
+            ]
+
+        in_from = "sf.path IN (SELECT path FROM t_from)"
+        to_in = "tf.path IN (SELECT path FROM t_to)"
+        outside = "NOT IN (SELECT path FROM t_from UNION SELECT path FROM t_to)"
+        direct = edges(f"{in_from} AND {to_in}", 20)
+        outbound = edges(f"{in_from} AND tf.path {outside}", 10)
+        inbound = edges(f"sf.path {outside} AND {to_in}", 10)
+
+    return {
+        "from_feature": from_feature,
+        "to_feature": to_feature,
+        "from_files_count": len(from_files),
+        "to_files_count": len(to_files),
+        "from_files_sample": sorted(from_files)[:5],
+        "to_files_sample": sorted(to_files)[:5],
+        "direct_connections": direct,
+        "direct_connection_count": len(direct),
+        "outbound_intermediate": outbound,
+        "inbound_intermediate": inbound,
+    }
 
 
 def create_mcp_server(version: str) -> FastMCP:
@@ -141,10 +219,9 @@ def create_mcp_server(version: str) -> FastMCP:
     _set_sync_job = core.set_sync_job
     _now_iso = core.now_iso
     _project_sync_summary = core.project_sync_summary
-    _spec_manager = core.spec_manager
-    _bridge_cache = core._bridge_cache
     MAX_CODE_CONTENT_CHARS = core.MAX_CODE_CONTENT_CHARS
     MAX_NOTE_CONTENT_CHARS = core.MAX_NOTE_CONTENT_CHARS
+    MAX_IMPACT_CALLERS = 50
 
     mcp = FastMCP(
         "trellis-core",
@@ -219,9 +296,7 @@ def create_mcp_server(version: str) -> FastMCP:
         job: dict = {}
         try:
             # Clear bridge cache for this project to avoid DB lock conflicts
-            if cache_key in _bridge_cache:
-                await asyncio.to_thread(_bridge_cache[cache_key].close)
-                del _bridge_cache[cache_key]
+            await asyncio.to_thread(core.evict_bridge, cache_key)
 
             # trellis_sync is the registration path: it may point at a repo that
             # has never been synced. All other tools require a registered project.
@@ -249,9 +324,7 @@ def create_mcp_server(version: str) -> FastMCP:
                 sync_result = await asyncio.to_thread(bridge.sync_project)
 
             # After sync, we need a fresh bridge since the old one closed its process
-            if cache_key in _bridge_cache:
-                await asyncio.to_thread(_bridge_cache[cache_key].close)
-                del _bridge_cache[cache_key]
+            await asyncio.to_thread(core.evict_bridge, cache_key)
 
             # Get fresh bridge for health check
             bridge = _get_bridge(cache_key)
@@ -456,20 +529,57 @@ def create_mcp_server(version: str) -> FastMCP:
         function_path: str = "",
         depth_mode: str = "standard",
     ) -> str:
-        """Analyze impact of changing a function.
+        """Analyze impact of changing a function: who calls it, and which
+        project.md features, decisions and constraints that touches.
 
-        Returns both technical and feature-level impact.
+        function_path: 'name', 'Class.method', 'path/to/file.py:function' or
+        'path/to/file.py:Class.method'. Use the file form when the name is
+        defined in more than one place (other_definitions lists the rest).
+
+        callers are confident call sites in non-test code; test_callers come
+        from test files; ambiguous_callers are by-name guesses that may point
+        at a same-named function elsewhere. Risk is computed from callers
+        (from ambiguous ones only when there are no others; see risk_note).
+        A class covers callers of the class and its methods.
+
+        depth_mode: 'standard' (direct callers) or 'deep' (also callers of
+        callers, up to 3 levels, in indirect_callers).
+
+        Example:
+          trellis_analyze_impact(project_id='my-api', function_path='services/billing.py:charge')
         """
+        def _brief(entries, cap):
+            return [f"{c['file_path']}:{c['line']} {c['qualified_name']}" for c in entries[:cap]]
+
         try:
             bridge = _get_bridge(project_id)
+            depth = 3 if depth_mode == "deep" else 1
+            report = await asyncio.to_thread(bridge.get_feature_impact, function_path, depth=depth)
+            if not report.get("found", True):
+                return _dump({k: report[k] for k in ("symbol", "error", "hint")})
 
-            # Get feature impact report
-            report = await asyncio.to_thread(bridge.get_feature_impact, function_path, depth=3)
-
-            # Format for MCP
+            callers = report.get("callers", [])
+            tests = report.get("test_callers", [])
+            ambiguous = report.get("ambiguous_callers", [])
+            indirect = report.get("indirect_callers", [])
             result = {
                 "symbol": function_path,
+                "resolved": report.get("resolved"),
+                "other_definitions": report.get("other_definitions", []),
                 "risk_level": report.get("risk_level", "unknown"),
+                "risk_note": report.get("risk_note") or None,
+                "caller_count": len(callers),
+                "callers": _brief(callers, MAX_IMPACT_CALLERS),
+                "callers_truncated": len(callers) > MAX_IMPACT_CALLERS,
+                "test_caller_count": len(tests),
+                "test_callers": _brief(tests, 10),
+                "ambiguous_caller_count": len(ambiguous),
+                "ambiguous_callers": _brief(ambiguous, 10),
+                "indirect_caller_count": len(indirect),
+                "indirect_callers": [
+                    f"depth {c['depth']}: {c['file_path']}:{c['line']} {c['qualified_name']}"
+                    for c in indirect[:MAX_IMPACT_CALLERS]
+                ],
                 "affected_functions": report.get("affected_functions_count", 0),
                 "affected_files": report.get("affected_files_count", 0),
                 "feature_impacts": [
@@ -481,9 +591,7 @@ def create_mcp_server(version: str) -> FastMCP:
                     }
                     for fi in report.get("feature_impacts", [])
                 ],
-                "development_pointers": report.get("development_pointers", [])[
-                    :10
-                ],  # Limit
+                "development_pointers": report.get("development_pointers", [])[:10],
                 "divergence_warnings": report.get("divergence_warnings", []),
             }
 
@@ -496,73 +604,43 @@ def create_mcp_server(version: str) -> FastMCP:
         project_id: str = "",
         function_path: str = "",
     ) -> str:
-        """Get details for a specific function.
+        """Get details (location, signature, source) for a function or class.
 
         function_path can be:
         - Just the function name: "create_llm"
         - Qualified name: "AIFactory.create_llm"
         - File:function format: "backend/ai/factory.py:create_llm"
+        - Dotted module path: "backend.ai.factory.create_llm"
+        When several definitions match, the best is returned and the rest
+        are listed in other_definitions.
         """
+        from src.trellis import graph_queries as gq
+
+        def _lookup(bridge):
+            bridge.ensure_fresh()
+            node = bridge.lookup_symbol(function_path)
+            file_part, name = gq.split_symbol(function_path)
+            if node is None:
+                # Not a function/class in the index (a constant, interface,
+                # type...): ask upstream, and keep only a hit in the named file.
+                node = bridge.upstream_ast_node(name, file_path=file_part or None)
+                found_in = (node or {}).get("file_path", "") if isinstance(node, dict) else ""
+                if file_part and not (found_in and gq.path_matches(found_in, file_part)):
+                    node = None
+            if not isinstance(node, dict) or not node.get("name"):
+                return {"error": f"Function '{function_path}' not found in index"}
+            return node
+
         try:
             bridge = _get_bridge(project_id)
-
-            # Handle file:function format by extracting just the function name
-            symbol = function_path
-            if ":" in function_path:
-                symbol = function_path.split(":")[-1]
-
-            # Try direct lookup first
-            node = await asyncio.to_thread(bridge.get_ast_node, symbol)
-
-            # If not found, try searching by name in SQLite
-            if not node or (
-                isinstance(node, dict) and ("error" in node or not node.get("name"))
-            ):
-                import sqlite3
-                from src.trellis.utils import resolve_code_graph_db
-
-                db_path = resolve_code_graph_db(bridge.project_path)
-                if db_path.exists():
-                    conn = sqlite3.connect(str(db_path))
-                    cursor = conn.cursor()
-
-                    # Search by name or qualified_name
-                    cursor.execute(
-                        """
-                        SELECT n.name, n.qualified_name, f.path, n.start_line, n.end_line, n.type, n.signature, n.code_content
-                        FROM nodes n
-                        JOIN files f ON n.file_id = f.id
-                        WHERE (n.name = ? OR n.qualified_name = ?)
-                          AND n.type IN ('function', 'method')
-                        LIMIT 5
-                    """,
-                        (symbol, symbol),
-                    )
-
-                    rows = cursor.fetchall()
-                    conn.close()
-
-                    if rows:
-                        # Return the first match
-                        row = rows[0]
-                        node = {
-                            "name": row[0],
-                            "qualified_name": row[1] or row[0],
-                            "file_path": row[2],
-                            "start_line": row[3],
-                            "end_line": row[4],
-                            "type": row[5],
-                            "signature": row[6] or "",
-                            "code_content": row[7] or "",
-                        }
-                    else:
-                        node = {"error": f"Function '{symbol}' not found in index"}
+            node = await asyncio.to_thread(_lookup, bridge)
 
             # Cap source payload so large functions don't flood the context
             if isinstance(node, dict) and isinstance(node.get("code_content"), str):
                 node["code_content"] = _truncate(
                     node["code_content"], MAX_CODE_CONTENT_CHARS
                 )
+            node.pop("source", None)
 
             return _dump(node)
         except Exception as e:
@@ -684,136 +762,13 @@ def create_mcp_server(version: str) -> FastMCP:
         """
         try:
             bridge = _get_bridge(project_id)
-
-            import sqlite3
-            from src.trellis.utils import resolve_code_graph_db
-
-            db_path = resolve_code_graph_db(bridge.project_path)
+            db_path = bridge.code_graph_path / "index.db"
             if not db_path.exists():
                 return _dump(
-                    {"error": "No code-graph database found. Run trellis_sync first."}
+                    {"error": "No code-graph database found. Run trellis sync first."}
                 )
 
-            # Resolve feature names to file patterns via project.md
-            from src.trellis.feature_impact import ProjectContextParser
-
-            context = await asyncio.to_thread(ProjectContextParser, str(bridge.project_path))
-            from_patterns = [f"%{from_feature}%"]
-            to_patterns = [f"%{to_feature}%"]
-
-            if from_feature in context.features:
-                from_patterns = [
-                    p.replace("**", "%").replace("*", "%")
-                    for p in context.features[from_feature].file_patterns
-                ]
-            if to_feature in context.features:
-                to_patterns = [
-                    p.replace("**", "%").replace("*", "%")
-                    for p in context.features[to_feature].file_patterns
-                ]
-
-            conn = sqlite3.connect(str(db_path))
-            cursor = conn.cursor()
-
-            def _files_for(patterns):
-                files = set()
-                for pat in patterns:
-                    cursor.execute(
-                        "SELECT DISTINCT path FROM files WHERE path LIKE ?", (pat,)
-                    )
-                    files.update(row[0] for row in cursor.fetchall())
-                return files
-
-            from_files = _files_for(from_patterns)
-            to_files = _files_for(to_patterns)
-
-            if not from_files:
-                return _dump({"error": f"Feature/module '{from_feature}' not found"})
-            if not to_files:
-                return _dump({"error": f"Feature/module '{to_feature}' not found"})
-
-            # Direct edges: source in from_files, target in to_files
-            from_ph = ",".join("?" * len(from_files))
-            to_ph = ",".join("?" * len(to_files))
-            cursor.execute(
-                f"""
-                SELECT DISTINCT sf.path, tf.path, s.name, e.relation
-                FROM edges e
-                JOIN nodes s ON e.source_id = s.id
-                JOIN nodes t ON e.target_id = t.id
-                JOIN files sf ON s.file_id = sf.id
-                JOIN files tf ON t.file_id = tf.id
-                WHERE e.relation IN ('calls', 'imports')
-                  AND sf.path IN ({from_ph})
-                  AND tf.path IN ({to_ph})
-                LIMIT 20
-            """,
-                tuple(from_files) + tuple(to_files),
-            )
-            direct = [
-                {"from_file": r[0], "to_file": r[1], "symbol": r[2], "relation": r[3]}
-                for r in cursor.fetchall()
-            ]
-
-            # One-hop indirect: from_files -> intermediate (not in from/to)
-            all_files = from_files | to_files
-            all_ph = ",".join("?" * len(all_files))
-            cursor.execute(
-                f"""
-                SELECT DISTINCT sf.path, tf.path, s.name, e.relation
-                FROM edges e
-                JOIN nodes s ON e.source_id = s.id
-                JOIN nodes t ON e.target_id = t.id
-                JOIN files sf ON s.file_id = sf.id
-                JOIN files tf ON t.file_id = tf.id
-                WHERE e.relation IN ('calls', 'imports')
-                  AND sf.path IN ({from_ph})
-                  AND tf.path NOT IN ({all_ph})
-                LIMIT 50
-            """,
-                tuple(from_files) + tuple(all_files),
-            )
-            outbound = [
-                {"from_file": r[0], "to_file": r[1], "symbol": r[2], "relation": r[3]}
-                for r in cursor.fetchall()
-            ]
-
-            cursor.execute(
-                f"""
-                SELECT DISTINCT sf.path, tf.path, s.name, e.relation
-                FROM edges e
-                JOIN nodes s ON e.source_id = s.id
-                JOIN nodes t ON e.target_id = t.id
-                JOIN files sf ON s.file_id = sf.id
-                JOIN files tf ON t.file_id = tf.id
-                WHERE e.relation IN ('calls', 'imports')
-                  AND sf.path NOT IN ({all_ph})
-                  AND tf.path IN ({to_ph})
-                LIMIT 50
-            """,
-                tuple(all_files) + tuple(to_files),
-            )
-            inbound = [
-                {"from_file": r[0], "to_file": r[1], "symbol": r[2], "relation": r[3]}
-                for r in cursor.fetchall()
-            ]
-
-            conn.close()
-
-            return _dump(
-                {
-                    "from_feature": from_feature,
-                    "to_feature": to_feature,
-                    "from_files_count": len(from_files),
-                    "to_files_count": len(to_files),
-                    "from_files_sample": sorted(from_files)[:5],
-                    "to_files_sample": sorted(to_files)[:5],
-                    "direct_connections": direct,
-                    "direct_connection_count": len(direct),
-                    "outbound_intermediate": outbound[:10],
-                    "inbound_intermediate": inbound[:10],
-                }
-            )
+            return _dump(await asyncio.to_thread(_trace_path, bridge, db_path, from_feature, to_feature))
         except Exception as e:
             return _dump({"error": str(e)})
 
@@ -873,10 +828,12 @@ def create_mcp_server(version: str) -> FastMCP:
     ) -> str:
         """Trace an HTTP route to its handler and downstream calls (web projects).
 
-        Given a route like 'GET /api/users' or '/api/users', returns the handler
-        symbol and its downstream call chain (middleware included by default,
-        capped at depth). Only useful for projects with indexed HTTP routes
-        (FastAPI/Flask/Express/etc.); others return a 'no routes found' result.
+        Given a URL like 'GET /api/users/12/' or a route pattern like
+        '/api/users/<pk>/', returns the handler(s) and their downstream call
+        chain (capped at depth). Django and Django REST Framework (urls.py,
+        include(), as_view(), routers, @action) are traced by Trellis; an empty
+        route_path lists all Django routes. FastAPI/Flask/Express use the
+        upstream tracer. Projects with no routes return an empty result.
 
         Example:
           trellis_trace_http_route(project_id='my-api', route_path='POST /api/login')
@@ -916,55 +873,25 @@ def create_mcp_server(version: str) -> FastMCP:
         project_id: str = "",
         limit: int = 20,
     ) -> str:
-        """Find high-centrality functions (potential hotspots).
+        """Find the most-used functions (potential hotspots).
 
-        Returns functions with the most incoming calls/imports.
+        Ranks non-test functions by how many distinct functions call them or
+        modules import them, from non-test code. Upstream by-name guesses
+        ('ambiguous' edges) are left out.
         """
+        from src.trellis import graph_queries as gq
+
+        def _hotspots(bridge):
+            bridge.ensure_fresh()
+            db_path = bridge.code_graph_path / "index.db"
+            if not db_path.exists():
+                return {"error": "No code-graph database found. Run trellis sync first."}
+            with gq.connect(db_path) as conn:
+                return {"hotspots": gq.hotspots(conn, limit)}
+
         try:
             bridge = _get_bridge(project_id)
-
-            import sqlite3
-            from src.trellis.utils import resolve_code_graph_db
-
-            db_path = resolve_code_graph_db(bridge.project_path)
-            if not db_path.exists():
-                return _dump(
-                    {"error": "No code-graph database found. Run trellis_sync first."}
-                )
-
-            hotspots = []
-            try:
-                conn = sqlite3.connect(str(db_path))
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT t.name, t.qualified_name, f.path, t.start_line, COUNT(*) as in_degree
-                    FROM edges e
-                    JOIN nodes t ON e.target_id = t.id
-                    JOIN files f ON t.file_id = f.id
-                    WHERE e.relation IN ('calls', 'imports', 'uses')
-                      AND t.type IN ('function', 'method')
-                    GROUP BY t.id
-                    ORDER BY in_degree DESC
-                    LIMIT ?
-                """,
-                    (limit,),
-                )
-                hotspots = [
-                    {
-                        "name": row[0],
-                        "qualified_name": row[1] or row[0],
-                        "file_path": row[2],
-                        "line": row[3],
-                        "in_degree": row[4],
-                    }
-                    for row in cursor.fetchall()
-                ]
-                conn.close()
-            except Exception:
-                pass
-
-            return _dump({"hotspots": hotspots})
+            return _dump(await asyncio.to_thread(_hotspots, bridge))
         except Exception as e:
             return _dump({"error": str(e)})
 
@@ -1130,7 +1057,10 @@ def create_mcp_server(version: str) -> FastMCP:
                     }
                 )
 
-            # Step 3: Query SQLite to find affected functions
+            # Step 3: Query SQLite to find affected functions. Refresh first so
+            # functions added or moved by this diff are in the index.
+            bridge = _get_bridge(project_id)
+            await asyncio.to_thread(bridge.ensure_fresh)
             db_path = resolve_code_graph_db(resolved)
             affected_functions = []
 
@@ -1186,22 +1116,28 @@ def create_mcp_server(version: str) -> FastMCP:
 
             # Step 4: Run impact analysis on unique affected functions (hard-capped:
             # each analysis spawns subprocesses, so unbounded loops time out)
-            bridge = _get_bridge(project_id)
             impact_results = []
             analyzed_symbols = set()
             functions_capped = False
 
             for func in affected_functions:
                 symbol = func["qualified_name"] or func["name"]
-                if symbol in analyzed_symbols:
+                key = (func["file_path"], symbol)
+                if key in analyzed_symbols:
                     continue
                 if len(analyzed_symbols) >= MAX_DIFF_FUNCTIONS:
                     functions_capped = True
                     break
-                analyzed_symbols.add(symbol)
+                analyzed_symbols.add(key)
 
                 try:
-                    report = await asyncio.to_thread(bridge.get_feature_impact, symbol, depth=2)
+                    report = await asyncio.to_thread(
+                        bridge.get_feature_impact,
+                        f"{func['file_path']}:{symbol}",
+                        refresh=False,
+                    )
+                    if not report.get("found", True):
+                        raise LookupError(report.get("error", "not found"))
                     impact_results.append(
                         {
                             "symbol": symbol,
@@ -1209,6 +1145,7 @@ def create_mcp_server(version: str) -> FastMCP:
                             "type": func["type"],
                             "changed_lines": func["changed_lines"],
                             "risk_level": report.get("risk_level", "unknown"),
+                            "caller_count": report.get("caller_count", 0),
                             "affected_functions": report.get("affected_functions_count", 0),
                             "affected_files": report.get("affected_files_count", 0),
                             "feature_impacts": [
@@ -1233,7 +1170,7 @@ def create_mcp_server(version: str) -> FastMCP:
             risk_scores = {"critical": 4, "high": 3, "medium": 2, "low": 1, "unknown": 0}
             max_risk = max(
                 [
-                    risk_scores.get(r["risk_level"], 0)
+                    risk_scores.get(str(r["risk_level"]).lower(), 0)
                     for r in impact_results
                     if "risk_level" in r
                 ],
@@ -1312,7 +1249,8 @@ def create_mcp_server(version: str) -> FastMCP:
             resolved = _resolve_project_path(project_id)
             graph = await asyncio.to_thread(NoteGraph, resolved)
 
-            tag_list = [t.strip() for t in tags.split(",")] if tags else []
+            # Omitted tags keep the note's current tags on update.
+            tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
             note = await asyncio.to_thread(
                 graph.save_note, note_id, content, title=title, tags=tag_list
             )

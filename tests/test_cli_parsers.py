@@ -81,3 +81,24 @@ def test_parse_json_array_garbage_returns_empty_list():
     assert parse_json_array("error: something broke") == []
     assert parse_json_array('{"envelope": true}') == []
     assert parse_json_array('["not", "dicts", 1]') == []
+
+
+def test_parse_impact_current_format_and_nesting():
+    from src.trellis.cli_parsers import parse_impact
+
+    out = (
+        "Impact: addIcon — Risk: MEDIUM\n"
+        "  2 direct, 4 callers total, 3 files, 0 routes (0 tests affected)\n"
+        "Callers:\n"
+        "  _iconAction  (method) src/action.js\n"
+        "  _addIconHandler  (method) src/ui/icon.js\n"
+        "    getActions  (method) src/action.js\n"
+        "      constructor  (method) src/imageEditor.js\n"
+    )
+    for text in (out, out.replace("—", "�")):  # dash lost to the console codepage
+        result = parse_impact(text)
+        assert result["risk"] == "MEDIUM"
+        assert (result["direct_callers"], result["total_callers"], result["files"]) == (2, 4, 3)
+        handler = result["callers"][1]
+        assert handler["children"][0]["name"] == "getActions"
+        assert handler["children"][0]["children"][0]["name"] == "constructor"

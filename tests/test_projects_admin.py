@@ -160,3 +160,32 @@ def test_stats_usage_defaults(api_client):
 def test_stats_usage_requires_token(api_client):
     resp = api_client.get("/stats/usage", headers=LOCAL_HOST)
     assert resp.status_code == 401
+
+
+def test_bridges_shared_and_evicted_across_aliases(monkeypatch, tmp_path):
+    from pathlib import Path as _Path
+
+    from src.trellis import core
+
+    class FakeBridge:
+        closed = 0
+
+        def __init__(self, path):
+            self.project_path = _Path(path).resolve()
+
+        def close(self):
+            FakeBridge.closed += 1
+
+    import src.trellis as trellis_pkg
+
+    monkeypatch.setattr(trellis_pkg, "CodeGraphBridge", FakeBridge)
+    monkeypatch.setattr(core, "resolve_project_path", lambda pid, allow_unregistered=False: str(tmp_path))
+    monkeypatch.setattr(core, "_bridge_cache", type(core._bridge_cache)())
+
+    by_id = core.get_bridge("demo")
+    by_path = core.get_bridge(str(tmp_path))
+    assert by_id is by_path
+
+    core.evict_bridge("some-other-alias")  # resolves to the same repo
+    assert FakeBridge.closed == 1
+    assert not core._bridge_cache

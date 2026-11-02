@@ -68,7 +68,8 @@ def _persist(doc: Dict[str, Any], data_dir=None) -> None:
     """Write the usage doc atomically so readers never see a partial file."""
     path = _usage_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    # Per-process tmp name: the MCP, API and CLI processes share this file.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(doc, fh)
     os.replace(tmp, path)

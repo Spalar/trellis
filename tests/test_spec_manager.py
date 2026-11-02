@@ -74,3 +74,28 @@ def test_save_falls_back_to_data_dir_without_resolver(tmp_path):
 
     assert path == tmp_path / "data" / "myproject" / "project.md"
     assert path.read_text(encoding="utf-8") == "# Spec"
+
+
+def test_template_is_parsed_as_a_feature(tmp_path):
+    from src.trellis.feature_impact import ProjectContextParser
+
+    (tmp_path / "project.md").write_text(
+        SpecManager(base_dir=str(tmp_path / "data")).create_template("demo"), encoding="utf-8"
+    )
+    feature = ProjectContextParser(str(tmp_path)).features["Example Feature"]
+
+    assert feature.description
+    assert feature.decisions[0].decision_id == "DEC-001"
+    assert feature.decisions[0].constraints
+    assert feature.file_patterns == ["src/example/**"]
+    assert feature.dependencies == ["Another Feature"]
+
+
+def test_load_does_not_create_dirs_or_read_server_cwd(tmp_path, monkeypatch):
+    (tmp_path / "cwd" / ".trellis").mkdir(parents=True)
+    (tmp_path / "cwd" / ".trellis" / "project.md").write_text("# Other repo", encoding="utf-8")
+    monkeypatch.chdir(tmp_path / "cwd")
+    manager = SpecManager(base_dir=str(tmp_path / "data"))
+
+    assert manager.load_spec("unknown-project") is None
+    assert not (tmp_path / "data" / "unknown-project").exists()

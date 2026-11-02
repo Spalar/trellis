@@ -229,3 +229,31 @@ def test_search_features(notes_project):
     results = graph.search_features("icons")
     assert len(results) == 1
     assert results[0].id == "feature-icons"
+
+
+def test_update_keeps_tags_title_and_created(tmp_path, monkeypatch):
+    from src.trellis.knowledge_graph import NoteGraph
+
+    monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "data"))
+    graph = NoteGraph(str(tmp_path))
+    first = graph.save_note("auth-notes", "v1", title="Auth Notes", tags=["feature"])
+    updated = NoteGraph(str(tmp_path)).save_note("auth-notes", "v2")
+
+    assert updated.content == "v2"
+    assert updated.title == "Auth Notes"
+    assert updated.tags == ["feature"]
+    assert updated.created_at == first.created_at
+
+
+def test_link_resolution_ignores_empty_and_partial_word_aliases(tmp_path, monkeypatch):
+    from src.trellis.knowledge_graph import NoteGraph
+
+    monkeypatch.setenv("TRELLIS_DATA_DIR", str(tmp_path / "data"))
+    graph = NoteGraph(str(tmp_path))
+    graph.save_note("cjk", "body", title="认证")  # slugs to ""
+    graph.save_note("oauth", "body", title="OAuth")
+    graph.save_note("feature-billing", "body", title="Feature: Billing")
+
+    assert graph._resolve_link("Unknown Thing") is None
+    assert graph._resolve_link("auth") is None
+    assert graph._resolve_link("billing") == "feature-billing"

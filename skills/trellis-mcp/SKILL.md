@@ -257,10 +257,10 @@ Re-analyze after implementing changes to catch unintended side effects. The code
 | `trellis_get_function` | `project_id`, `function_path` | Function details (signature, file, line, source) | Inspect before modifying |
 | `trellis_module_overview` | `project_id`, `module_path` | Module overview with symbols | Understand a code directory |
 | `trellis_tour` | `project_id`, `path` | Dependency-ordered module reading list (foundational → entry) | Onboard to an unfamiliar codebase or subtree |
-| `trellis_analyze_impact` | `project_id`, `function_path`, `depth_mode` | Risk level, affected counts, features | Before every change |
+| `trellis_analyze_impact` | `project_id`, `function_path`, `depth_mode` | Resolved definition, callers list, test/ambiguous callers, risk, features | Before every change |
 | `trellis_feature_info` | `project_id`, `feature_name` | Feature spec, functions, hot functions | Understand a project.md feature |
 | `trellis_trace_path` | `project_id`, `from_feature`, `to_feature` | Dependency paths between features/modules | Trace dependencies |
-| `trellis_trace_http_route` | `project_id`, `route_path`, `depth` | Handler + downstream calls for an HTTP route | Web projects with indexed routes (JS/TS Express-style) |
+| `trellis_trace_http_route` | `project_id`, `route_path`, `depth` | Handler + downstream calls for an HTTP route | Web projects: Django/DRF (empty `route_path` lists routes), FastAPI, Flask, Express |
 | `trellis_detect_hotspots` | `project_id`, `limit` | High-centrality functions | Find complex areas |
 | `trellis_project_health` | `project_id`, `limit` | Chokepoints, circular imports, surprising couplings | Architecture audit; before large refactors |
 | `trellis_get_graph` | `project_id`, `max_nodes` | Graph data (simplified view for large repos) | Visualization or analysis |
@@ -308,11 +308,14 @@ Re-analyze after implementing changes to catch unintended side effects. The code
 - Returns: Spec, decisions, constraints, functions, hot functions, related notes
 
 **trellis_get_function**:
-- `function_path`: Function name, qualified name, or file:function format
+- `function_path`: Function name, qualified name, `path/file.py:function`, or dotted `package.module.function`
+- Returns `other_definitions` when the name exists in more than one place
 
 **trellis_analyze_impact**:
-- `function_path`: Function name or qualified name (e.g., "authenticate_user" or "auth.authenticate_user")
-- `depth_mode`: "standard" or "deep" for analysis depth
+- `function_path`: `name`, `Class.method`, `path/file.py:function` or `path/file.py:Class.method`. Use the file form when `other_definitions` shows the name is defined in several places.
+- Returns `callers` (confident call sites in non-test code, as `file:line name`), `test_callers`, and `ambiguous_callers` (by-name guesses that may belong to a same-named function elsewhere). Risk is based on `callers` only.
+- Works on classes too (callers of the class and of its methods). If only ambiguous callers exist, `risk_note` says so and risk is based on them.
+- `depth_mode`: "standard" (direct callers) or "deep" (adds `indirect_callers`, up to 3 levels)
 
 **trellis_get_graph**:
 - `project_id`: Project identifier
@@ -327,7 +330,7 @@ Re-analyze after implementing changes to catch unintended side effects. The code
 **trellis_detect_hotspots**:
 - `project_id`: Project identifier
 - `limit`: Number of hotspots to return (default: 20)
-- Returns: Functions with the most incoming calls/imports
+- Returns: Non-test functions ranked by `used_by` (distinct calling functions and importing modules in non-test code; ambiguous by-name edges excluded)
 
 **trellis_analyze_diff** (disabled by default):
 - Only registered when the server runs with `TRELLIS_ENABLE_DIFF_ANALYSIS=1`

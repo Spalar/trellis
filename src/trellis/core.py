@@ -474,18 +474,28 @@ def _is_inside_trellis(path: Path, trellis_root: Path) -> bool:
 
 
 def get_bridge(project_id: str, allow_unregistered: bool = False) -> "CodeGraphBridge":
-    """Get or create bridge for project (LRU-bounded; evicted bridges close)."""
+    """Get or create bridge for project (LRU-bounded; evicted bridges close).
+
+    Ids that resolve to the same repo ('my-api', '/home/me/src/my-api')
+    share one bridge: two code-graph servers on one index fight over its
+    lock, and each one's zombie cleanup kills the other.
+    """
     if project_id not in _bridge_cache:
         from src.trellis import CodeGraphBridge
 
-        resolved = resolve_project_path(project_id, allow_unregistered)
-        _bridge_cache[project_id] = CodeGraphBridge(resolved)
+        resolved = Path(resolve_project_path(project_id, allow_unregistered)).resolve()
+        same_repo = next(
+            (b for b in _bridge_cache.values() if getattr(b, "project_path", None) == resolved),
+            None,
+        )
+        _bridge_cache[project_id] = same_repo or CodeGraphBridge(str(resolved))
         while len(_bridge_cache) > _BRIDGE_CACHE_MAX:
-            _old_key, _old_bridge = _bridge_cache.popitem(last=False)
-            try:
-                _old_bridge.close()
-            except Exception:
-                pass
+            _old_key, old = _bridge_cache.popitem(last=False)
+            if not any(b is old for b in _bridge_cache.values()):
+                try:
+                    old.close()
+                except Exception:
+                    pass
     _bridge_cache.move_to_end(project_id)
     return _bridge_cache[project_id]
 
@@ -497,7 +507,19 @@ def evict_bridge(project_id: str) -> None:
     removed so the bridge cache does not hold a stale index handle.
     """
     bridge = _bridge_cache.pop(project_id, None)
+    if bridge is None:
+        # Cached under another alias of the same repo (id vs path)?
+        try:
+            resolved = Path(resolve_project_path(project_id, allow_unregistered=True)).resolve()
+        except (ValueError, OSError):
+            resolved = None
+        bridge = next(
+            (b for b in _bridge_cache.values() if getattr(b, "project_path", None) == resolved),
+            None,
+        )
     if bridge is not None:
+        for alias in [k for k, b in _bridge_cache.items() if b is bridge]:
+            del _bridge_cache[alias]
         try:
             bridge.close()
         except Exception:

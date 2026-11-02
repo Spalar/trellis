@@ -41,7 +41,9 @@ def parse_impact(stdout: str) -> Dict[str, Any]:
         return {}
 
     header = lines[0]
-    match = re.match(r"Impact:\s*(.+?)\s*—\s*Risk:\s*(\w+)", header)
+    # Any single separator between name and risk ('—', or a mangled byte when
+    # the console codepage can't encode it).
+    match = re.match(r"Impact:\s*(.+?)\s+\S\s+Risk:\s*(\w+)", header)
     if not match:
         return {"text": stdout}
 
@@ -52,10 +54,11 @@ def parse_impact(stdout: str) -> Dict[str, Any]:
         "callers": [],
     }
 
-    # Newer servers print "N direct, M callers, K files, R routes (T tests)";
-    # older ones "N direct callers, N total, N files, N routes".
+    # Current servers print "N direct, M callers total, K files, R routes";
+    # earlier ones "N direct, M callers, ..." or "N direct callers, N total, ...".
     summary_match = re.search(
-        r"(\d+)\s+direct(?:\s+callers?)?,\s+(\d+)\s+(?:total|callers),\s+(\d+)\s+files?,\s+(\d+)\s+routes?",
+        r"(\d+)\s+direct(?:\s+callers?)?,\s+(\d+)\s+(?:callers\s+total|total|callers),"
+        r"\s+(\d+)\s+files?,\s+(\d+)\s+routes?",
         stdout,
     )
     if summary_match:
@@ -64,7 +67,7 @@ def parse_impact(stdout: str) -> Dict[str, Any]:
         result["files"] = int(summary_match.group(3))
         result["routes"] = int(summary_match.group(4))
 
-    caller_re = re.compile(r"^\s+((?:\s{2,})?)(\S.*?)\s+\(([^)]+)\)\s+(.+)$")
+    caller_re = re.compile(r"^(\s+)(\S.*?)\s+\(([^)]+)\)\s+(.+)$")
     stack: List[Dict[str, Any]] = []
     for line in lines[2:]:
         if line.strip().startswith("Callers:"):
@@ -72,7 +75,8 @@ def parse_impact(stdout: str) -> Dict[str, Any]:
         m = caller_re.match(line)
         if not m:
             continue
-        indent = len(m.group(1)) // 2
+        # Top-level callers are indented 2 spaces; each nesting level adds 2.
+        indent = max(len(m.group(1)) // 2 - 1, 0)
         name = m.group(2).strip()
         kind = m.group(3).strip()
         location = m.group(4).strip()

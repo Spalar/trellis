@@ -111,10 +111,11 @@ class SpecManager:
         """Sanitize project name for filesystem."""
         return "".join(c if c.isalnum() or c in "._-" else "_" for c in name).strip("_")
 
-    def _project_dir(self, project_id: str) -> Path:
-        """Get project data directory."""
+    def _project_dir(self, project_id: str, create: bool = False) -> Path:
+        """Project data directory (created only when writing)."""
         d = self.base_dir / self._safe_name(project_id)
-        d.mkdir(parents=True, exist_ok=True)
+        if create:
+            d.mkdir(parents=True, exist_ok=True)
         return d
 
     def _repo_spec_candidates(self, project_id: str) -> list:
@@ -140,10 +141,14 @@ class SpecManager:
         the file feature analysis reads. Falls back to the data directory and
         legacy locations for unresolved projects.
         """
+        if not self._safe_name(project_id):
+            return None
+        data_dir = self._project_dir(project_id)
+        # No server-CWD fallback: it would hand any unresolved project the
+        # spec of whatever repo the server happens to run in.
         locations = self._repo_spec_candidates(project_id) + [
-            self._project_dir(project_id) / "project.md",
-            self._project_dir(project_id) / "docs" / "project.md",
-            Path(".trellis") / "project.md",  # Legacy
+            data_dir / "project.md",
+            data_dir / "docs" / "project.md",
         ]
 
         for path in locations:
@@ -168,7 +173,9 @@ class SpecManager:
             path = repo_candidates[0]
             path.write_text(content, encoding="utf-8")
             return path
-        path = self._project_dir(project_id) / "project.md"
+        if not self._safe_name(project_id):
+            raise ValueError(f"Invalid project id: {project_id!r}")
+        path = self._project_dir(project_id, create=True) / "project.md"
         path.write_text(content, encoding="utf-8")
         return path
 
@@ -177,51 +184,29 @@ class SpecManager:
         return self.load_spec(project_id) is not None
 
     def create_template(self, project_id: str, project_purpose: str = "") -> str:
-        """Create a project.md template."""
-        template = f"""# {project_id} Project Specification
+        """A project.md starter in the layout feature analysis parses.
+
+        Only "## Feature: <Name>" sections are read (description paragraph,
+        ### Decisions, ### Files, ### Dependencies); other sections are free
+        text for people.
+        """
+        return f"""# {project_id}
 
 ## Overview
-{project_purpose or f"Project {project_id}"}
 
-## Purpose
-<!-- Describe the core problem this project solves -->
+{project_purpose or "What this project does and who it is for."}
 
-## Target Users
-<!-- Who uses this system? -->
+## Feature: Example Feature
 
-## Architecture
-<!-- High-level architecture and key components -->
+One paragraph on what this feature does.
 
-### Core Components
-| Component | Responsibility |
-|-----------|---------------|
-| **Feature A** | Description |
-| **Feature B** | Description |
+### Decisions
+- DEC-001: What was decided (because: why it was decided)
+  - Constraint: What must stay true when changing this feature
 
-## Key Features
-<!-- List major features -->
+### Files
+- src/example/**
 
-### 1. Feature Name
-Description of feature.
-
-## Design Decisions
-<!-- Why key architectural decisions were made -->
-
-## Future Directions
-- [ ] Roadmap item 1
-- [ ] Roadmap item 2
-
-## Related Features
-<!-- Links between features -->
-
-## Constraints
-<!-- What this system does NOT do -->
+### Dependencies
+- Feature: Another Feature
 """
-        return template
-
-    def enrich_with_code(
-        self, project_id: str, spec: ProjectSpec, code_summary: str
-    ) -> str:
-        """Suggest updates to project.md based on code analysis."""
-        # For now, return the existing spec
-        return spec.content

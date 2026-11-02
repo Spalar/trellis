@@ -1,5 +1,141 @@
 # Changelog
 
+## Unreleased
+
+Benchmarks below: a Python/Django project with 875 Python files and ~11k
+functions, and a JavaScript project with ~100 files.
+
+### Fixed — call graph accuracy
+- **Python calls follow imports.** Calls were matched by name only: same
+  file first, else the first function anywhere with that name, and
+  `obj.method()` kept only `method`. The indexer now resolves
+  `from x import y`, `import x as m` + `m.f()`, relative imports, `__init__`
+  re-exports, `self`/`cls`/`super()` through project base classes, and nested
+  functions (including ones called before they are defined). Calls it cannot
+  pin to one definition, and calls to parameters or local variables that
+  shadow a module function, are skipped instead of guessed. Each run removes
+  Trellis's own edges that no longer resolve.
+  - Trellis-owned call edges: 14,153 → 2,932 (13,911 wrong edges removed);
+    total edges 86,134 → 74,913.
+  - Example: a helper defined in four modules had 33 callers attributed,
+    11 of them confident; it now has 1. Its real callers in other modules,
+    previously missing, are found.
+- **Decorated functions were never indexed as callers** (the engine records
+  them at the decorator line): 686 functions in the Python benchmark,
+  including most API views.
+- **Callers matched by node id, not by name.** `trellis_analyze_impact`
+  returns the `callers` list (`file:line name`), plus `test_callers` and
+  `ambiguous_callers`. Engine by-name guesses marked ambiguous are reported
+  separately and dropped when the same caller is confidently bound to
+  another same-named function; on the benchmark every one of them pointed
+  at the wrong function. Risk uses confirmed non-test callers, and is no
+  longer LOW when only unconfirmed callers exist (`risk_note`).
+- `file.py:function`, `file.py:Class.method` and `package.module.function`
+  keep the file part in `trellis_analyze_impact` and `trellis_get_function`
+  (it used to be dropped, returning a same-named function from another
+  file). Other matches are listed in `other_definitions`. Unknown symbols
+  return an error instead of risk LOW with 0 callers.
+- **Edits re-link immediately.** Re-indexing a file deletes every edge
+  into it, including Trellis edges from unchanged files, and the repair ran
+  at most once a minute and only when a file had lost all its edges.
+  Changes are now detected on each query from `files.indexed_at`, node ids
+  and edge counts (a same-second re-index, or one that lands during a
+  re-link, is caught too). A failed re-link retries after 60 s instead of
+  on every call. The saved state is two hashes instead of a per-file map.
+- Feature `hot_functions` and `trellis_detect_hotspots` ranked test helpers
+  first (e.g. `create`/`get` in test classes with 1,000+ edges). They now
+  count distinct confident callers from non-test code (hotspots also count
+  importing modules, as `used_by`).
+- Feature function lists dropped same-named functions in different files.
+- project.md file patterns had three different matchers; the main one
+  turned `**` into `.[^/]*` and matched anywhere in a path. One anchored
+  matcher is used everywhere.
+- Affected decisions were listed once per matching constraint.
+
+### Fixed — JavaScript augmentation
+- The pattern indexer walked the whole repository (virtualenvs, build
+  output, nested checkouts) and parsed each file four times. It now scans
+  the `.js` files the index contains, parsing each once: 600+ s → 0.3 s on
+  the Python benchmark (80 `.js` files); 8.4 s → 0.6 s on the JavaScript
+  benchmark, same edges except those inside built bundles under `dist/`.
+- Only the last `getComponent()` call site per component got an edge;
+  every call site does now (+51 caller edges on the JavaScript benchmark).
+- Class lookup used hard-coded file names. It now picks the class in the
+  caller's own file, else the file the caller's `import` names (relative
+  and alias specifiers), else the nearest directory, preferring non-test
+  code. All previous correct edges are kept.
+- Augmented edges are marked and replaced on each run. Edges left by older
+  versions are removed when they are cross-file (the engine labels every
+  cross-file call `inferred`/`ambiguous`, so unmarked `extracted` ones can
+  only be leftovers); same-file ones are correct and kept.
+- An engine `ambiguous` guess for a pair no longer blocks a confirmed edge.
+
+### Fixed — other
+- Note updates dropped tags, title and created date when they were not
+  passed again (MCP and REST). A title with no ASCII letters made every
+  unknown `[[link]]` resolve to it; partial link matches need whole words.
+- Two ids for one repository started two engine servers on one index,
+  which could kill each other; they now share one bridge.
+- A CLI fallback stopped the engine server (and its file watcher) and slept
+  0.5 s; only index-writing commands do that now. CLI timeouts are reported
+  as failures instead of raising.
+- `trellis sync --incremental` and incremental MCP sync only ran a status
+  check; they now re-index changed files and re-link edges.
+- Wrappers returned shapes that no longer matched the engine:
+  `find_references` (dict, not list), `get_call_graph` (no `symbol`/`nodes`),
+  `module_overview` (no `files`), CLI impact (`total_callers` never parsed;
+  nested callers flattened). The visualizer impact graph was always empty;
+  it is now built from the impact analysis.
+- `trellis_trace_path` ran SQLite on the event loop, could exceed SQLite's
+  parameter limit on large features, matched module names case-sensitively
+  and counted ambiguous edges.
+- Diff analysis refreshes the index before finding changed functions,
+  deduplicates by file + name, and reports `overall_risk` (it was always
+  `unknown`: risk levels were compared case-sensitively).
+- `trellis_get_function` with `file:name` for a non-function symbol
+  (constant, interface, type) asks the engine and keeps only a hit in that
+  file.
+- The project.md template used a layout the parser ignores; it now
+  produces a parseable feature section. Loading a spec no longer creates
+  directories or reads the server's working directory.
+- Telemetry writes moved off the event loop, with a per-process temp file.
+- Zombie-process cleanup kept the wrong PIDs and deleted `index.lock`.
+- Visualizer risk colour was always "low"; symbol API routes accept `/`.
+- `launcher` resolved the repository root to `src/` outside frozen builds.
+
+### Changed
+- **The bundled release requires a token over HTTP.** It used to set
+  `TRELLIS_ALLOW_NO_AUTH=true`, so any local program could call the API.
+  It now uses `TRELLIS_API_KEY`, or a token kept in
+  `<TRELLIS_DATA_DIR>/api-token` (created on first start, printed to
+  stderr). The UI needs no change (the served page carries the token);
+  HTTP MCP clients connecting to the bundle must send
+  `Authorization: Bearer <token>`. stdio MCP is unaffected.
+- JavaScript integration tests: 7 of 18 failed (index read before it was
+  built, and wrapper shapes above); all 18 pass.
+
+### Added
+- **Django / Django REST Framework route tracing** in
+  `trellis_trace_http_route`: `path()`/`re_path()`/`url()`, `include()`,
+  `as_view()` with action mappings, routers with `@action`, module constants
+  and simple loops. Dispatch follows Django (first match, typed converters);
+  placeholder ids fall back to a loose match (flagged in `note`) instead of
+  a catch-all route. An empty `route_path` lists all routes. When no Django
+  route matches, the engine's tracer is tried (projects can mix
+  frameworks). Benchmark: 200 routes found; cold trace 2.3 s, cached 0.04 s.
+- `trellis_analyze_impact`: classes (callers of the class and its methods)
+  and `depth_mode="deep"` (`indirect_callers`, up to 3 levels).
+
+### Performance
+- Impact analysis: four engine round-trips (each could fall back to a CLI
+  process) → one SQLite read, ~5 ms. Unchanged repeat queries ~10 ms.
+- Python call indexing: 6.0 s → 3.0 s cold, 0.2 s warm (files cached by
+  mtime/size).
+- Hot functions: one SQLite connection per function → one query (10–30 ms
+  per feature).
+- `project.md` parsing and index-path lookup are cached.
+- Removed 30 MB of stray server logs from the repository.
+
 ## v0.4.1 — 2026-10-11
 
 ### Added
