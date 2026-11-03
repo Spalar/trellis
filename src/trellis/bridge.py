@@ -564,10 +564,24 @@ class CodeGraphBridge:
             return {"text": result}
         return {}
 
+    @staticmethod
+    def _raise_if_building(result: Dict[str, Any]) -> None:
+        """Turn the engine's 'index is still being built' refusal into an error.
+
+        While the engine server (re)builds an index, e.g. once after an
+        engine upgrade, CLI queries exit 1 with that message; returning an
+        empty result instead reads as "no modules" or "no routes".
+        """
+        text = "\n".join((result.get("stdout") or "", result.get("stderr") or ""))
+        if "still being built" in text:
+            line = next(ln for ln in text.splitlines() if "still being built" in ln)
+            raise RuntimeError(line.replace("[code-graph]", "").strip())
+
     def _cli_parse(self, parser, *cli_args) -> Any:
         """Run a CLI command and parse its stdout."""
         result = self._run_cli(*cli_args)
         if not result.get("success"):
+            self._raise_if_building(result)
             return {}
         return parser(result["stdout"])
 
@@ -840,7 +854,20 @@ class CodeGraphBridge:
 
                 base = {"framework": "django", "route": route_path, "route_count": len(routes)}
                 if not route_path.strip():
-                    return dict(base, routes=[describe(r, False) for r in routes[:200]])
+                    # One line per route: '/path  GET handler, POST handler'.
+                    def line(route):
+                        handlers = ", ".join(
+                            f"{h.get('method', 'ANY')} {h.get('handler', '?')}" for h in route.handlers
+                        )
+                        return f"/{route.path}  {handlers}" + ("  (loose match)" if route.loose else "")
+
+                    listed = [line(r) for r in routes[:300]]
+                    return dict(
+                        base,
+                        routes=listed,
+                        routes_truncated=len(routes) > len(listed),
+                        hint="Pass one URL or pattern ('GET /api/x/1/') to get its handlers' downstream calls.",
+                    )
                 matches = match_routes(routes, route_path)
                 if not matches:
                     # Last path word that is not an id: 'GET /api/users/12/' -> 'users'
@@ -971,6 +998,12 @@ class CodeGraphBridge:
                 node["start_line"] = node.pop("line")
                 node["code_content"] = gq.code_content(conn, node["id"]) or ""
                 node["other_definitions"] = [gq.describe(m) for m in matches[1:10]]
+                if node["type"] in gq.FUNC_TYPES:
+                    node["callees"] = gq.callees_of(conn, node["id"])
+                    found = gq.callers_of(conn, node["id"])
+                    node["callers"] = found["callers"]
+                    node["test_caller_count"] = len(found["test_callers"])
+                    node["ambiguous_caller_count"] = len(found["ambiguous"])
                 return node
         except Exception:
             return None
@@ -1017,7 +1050,22 @@ class CodeGraphBridge:
         ]
 
     def project_map(self) -> Dict[str, Any]:
-        """Get full project architecture overview."""
+        """Modules, module dependencies, entry points and hot functions.
+
+        Reads the CLI's `map --json`: the MCP `project_map` tool caps its
+        arrays to fit its token budget (15 of 71 modules and of 209
+        dependencies on a large project) and says so only in
+        `_array_truncations`. The MCP tool is the fallback.
+        """
+        result = self._run_cli("map", "--json", timeout=120)
+        self._raise_if_building(result)
+        if result.get("success"):
+            try:
+                data = json.loads(result["stdout"])
+                if isinstance(data, dict) and "modules" in data:
+                    return data
+            except ValueError:
+                pass
         return self._mcp_then_cli("project_map", {}, ["map"], cli_parsers.parse_map)
 
     def module_overview(self, module_path: str) -> Dict[str, Any]:
@@ -1519,7 +1567,10 @@ class CodeGraphBridge:
         modules = pmap.get("modules", [])
         for mod in modules:
             mod_path = mod.get("path", "")
-            symbol_count = mod.get("symbol_count", 0)
+            symbol_count = sum(
+                mod.get(k, 0) or 0
+                for k in ("functions", "classes", "interfaces_traits", "constants", "other")
+            ) or mod.get("symbols", 0)
             nodes.append(
                 {
                     "id": f"mod:{mod_path}",

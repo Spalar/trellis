@@ -188,6 +188,42 @@ def callers_of(conn: sqlite3.Connection, node_id: int) -> Dict[str, List[Dict]]:
     return split
 
 
+def callees_of(conn: sqlite3.Connection, node_id: int, limit: int = 50) -> List[Dict]:
+    """Project functions/methods `node_id` calls through confident edges.
+
+    Calls into external code (no project definition) and upstream by-name
+    guesses are left out, and so are test-file targets of a non-test caller:
+    production code does not call into tests, so such an edge is a
+    mis-resolved method call (a Django `qs.first()` bound to `SomeTests.first`).
+    """
+    source = conn.execute(
+        "SELECT f.path FROM nodes n JOIN files f ON n.file_id = f.id WHERE n.id = ?", (node_id,)
+    ).fetchone()
+    from_test = bool(source) and is_test_path(source[0])
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT t.id, t.name, t.qualified_name, f.path, t.start_line, t.type
+        FROM edges e
+        JOIN nodes t ON e.target_id = t.id
+        JOIN files f ON t.file_id = f.id
+        WHERE e.relation = 'calls' AND e.source_id = ? AND t.id != ? {confident_filter(conn)}
+          AND t.type IN ('function', 'method', 'class')
+        ORDER BY f.path, t.start_line
+        """,
+        (node_id, node_id),
+    )
+    found = []
+    for r in rows:
+        if not from_test and is_test_path(r[3]):
+            continue
+        found.append(
+            {"node_id": r[0], "name": r[1], "qualified_name": r[2] or r[1], "file_path": r[3], "line": r[4], "type": r[5]}
+        )
+        if len(found) >= limit:
+            break
+    return found
+
+
 def _resolved_elsewhere(conn: sqlite3.Connection, node_id: int, sources: List[int]) -> set:
     """Sources whose call to this name is confidently bound to another definition.
 
@@ -238,6 +274,27 @@ def caller_counts(conn: sqlite3.Connection, node_ids: Iterable[int]) -> Dict[int
             if not is_test_path(path):
                 counts[target] = counts.get(target, 0) + n
     return counts
+
+
+def named_caller_count(conn: sqlite3.Connection, path: str, name: str, kind: str) -> int:
+    """Distinct confident, non-test callers of every `name` of type `kind` in `path`.
+
+    For engine rows that name a symbol by file and name only (centrality).
+    """
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT e.source_id, sf.path
+        FROM nodes t
+        JOIN files tf ON t.file_id = tf.id
+        JOIN edges e ON e.target_id = t.id AND e.relation = 'calls' {confident_filter(conn)}
+        JOIN nodes s ON e.source_id = s.id
+        JOIN files sf ON s.file_id = sf.id
+        WHERE tf.path = ? AND t.name = ? AND t.type = ?
+          AND e.source_id != t.id AND s.type IN ('function', 'method')
+        """,
+        (path, name, kind),
+    )
+    return sum(1 for _, source_path in rows if not is_test_path(source_path))
 
 
 def callers_of_all(conn: sqlite3.Connection, node_ids: List[int]) -> Dict[str, List[Dict]]:

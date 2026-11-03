@@ -346,12 +346,6 @@ def analyze_feature_risks(context: "ProjectContextParser", impact: FeatureImpact
             "Feature is deprecated - changes may indicate migration needed"
         )
 
-    # Check dependencies
-    if feature.dependencies:
-        impact.risk_flags.append(
-            f"Feature has {len(feature.dependencies)} dependencies: {', '.join(feature.dependencies)}"
-        )
-
     # Generate recommendations
     if impact.affected_decisions:
         impact.recommended_actions.append(

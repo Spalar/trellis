@@ -251,15 +251,15 @@ Re-analyze after implementing changes to catch unintended side effects. The code
 | Tool | Parameters | Returns | When to Use |
 |------|-----------|---------|-------------|
 | `trellis_sync_status` | `project_id` | Index existence, node/file counts, `project_md` status, sync state (running/completed/failed), guidance | Start of every session; check whether the operator's `trellis sync` has finished — while it says running, keep waiting |
-| `trellis_list_modules` | `project_id` | List of directories with symbol counts | Understand structure |
-| `trellis_search_code` | `project_id`, `query`, `limit` | Matching functions/classes with paths | Find code by keyword |
+| `trellis_list_modules` | `project_id` | Every module as `path: N files, M symbols (languages)` | Understand structure |
+| `trellis_search_code` | `project_id`, `query`, `limit` | One line per hit: `path:start-end type name(signature)` (no source) | Find code by keyword |
 | `trellis_ast_search` | `project_id`, `query`, `node_type`, `returns`, `params`, `limit` | Matching symbols filtered by structure/signature | Find code by type, return type, or params (e.g. all `class` nodes) |
-| `trellis_get_function` | `project_id`, `function_path` | Function details (signature, file, line, source) | Inspect before modifying |
-| `trellis_module_overview` | `project_id`, `module_path` | Module overview with symbols | Understand a code directory |
-| `trellis_tour` | `project_id`, `path` | Dependency-ordered module reading list (foundational → entry) | Onboard to an unfamiliar codebase or subtree |
+| `trellis_get_function` | `project_id`, `function_path` | Signature, location, source, plus `callers` and `callees` (`path:line name`) | Inspect before modifying; one call covers a function and its neighbours |
+| `trellis_module_overview` | `project_id`, `module_path` | Per file: `line kind name` entries; top outgoing edges | Understand a code directory |
+| `trellis_tour` | `project_id`, `path` | Dependency-ordered reading list (foundational → entry), one line per module: `path [role] uses: … \| used by N \| key: …` | Onboard to an unfamiliar codebase or subtree |
 | `trellis_analyze_impact` | `project_id`, `function_path`, `depth_mode` | Resolved definition, callers list, test/ambiguous callers, risk, features | Before every change |
 | `trellis_feature_info` | `project_id`, `feature_name` | Feature spec, functions, hot functions | Understand a project.md feature |
-| `trellis_trace_path` | `project_id`, `from_feature`, `to_feature` | Dependency paths between features/modules | Trace dependencies |
+| `trellis_trace_path` | `project_id`, `from_feature`, `to_feature` | `src_file:caller -> dst_file:callee (relation)` lines, direct and one hop | Trace dependencies |
 | `trellis_trace_http_route` | `project_id`, `route_path`, `depth` | Handler + downstream calls for an HTTP route | Web projects: Django/DRF (empty `route_path` lists routes), FastAPI, Flask, Express |
 | `trellis_detect_hotspots` | `project_id`, `limit` | High-centrality functions | Find complex areas |
 | `trellis_project_health` | `project_id`, `limit` | Chokepoints, circular imports, surprising couplings | Architecture audit; before large refactors |
@@ -283,14 +283,14 @@ Re-analyze after implementing changes to catch unintended side effects. The code
 
 | Tool | Parameters | Returns | When to Use |
 |------|-----------|---------|-------------|
-| `trellis_get_boundary_map` | `project_id` | Module boundary map | Identify boundaries |
+| `trellis_get_boundary_map` | `project_id` | Modules and `from -> to (N imports)` lines, most imports first (150 max) | Identify boundaries |
 | `trellis_analyze_diff` | `project_id`, `diff`, `compare_branch` | Changed files, affected functions, impact report, risk level | **Disabled by default** (`TRELLIS_ENABLE_DIFF_ANALYSIS=1` to enable); prefer per-function `trellis_analyze_impact` |
 
 ### Tool Parameter Details
 
 **trellis_list_modules**:
 - `project_id`: Project identifier
-- Returns: Directory modules with file and symbol counts
+- Returns: every directory module (`module_count`), one line each with file and symbol counts
 
 **trellis_search_code**:
 - `project_id`: Project identifier
@@ -299,8 +299,8 @@ Re-analyze after implementing changes to catch unintended side effects. The code
 
 **trellis_module_overview**:
 - `project_id`: Project identifier
-- `module_path`: Directory path or module name
-- Returns: Symbols and files in that module
+- `module_path`: Directory or file path from the repo root. Paths at or below it are used; a substring match is the fallback (`match` says which)
+- Returns: Symbols per file (`line kind name`) and the module's top outgoing call/import edges
 
 **trellis_feature_info**:
 - `project_id`: Project identifier
@@ -310,12 +310,14 @@ Re-analyze after implementing changes to catch unintended side effects. The code
 **trellis_get_function**:
 - `function_path`: Function name, qualified name, `path/file.py:function`, or dotted `package.module.function`
 - Returns `other_definitions` when the name exists in more than one place
+- For functions and methods also returns `callees` (project functions it calls, up to 30), `callers` (confident non-test, up to 15), `caller_count`, `test_caller_count`, `ambiguous_caller_count`. Use `trellis_analyze_impact` for the full caller list and feature impact
 
 **trellis_analyze_impact**:
 - `function_path`: `name`, `Class.method`, `path/file.py:function` or `path/file.py:Class.method`. Use the file form when `other_definitions` shows the name is defined in several places.
 - Returns `callers` (confident call sites in non-test code, as `file:line name`), `test_callers`, and `ambiguous_callers` (by-name guesses that may belong to a same-named function elsewhere). Risk is based on `callers` only.
 - Works on classes too (callers of the class and of its methods). If only ambiguous callers exist, `risk_note` says so and risk is based on them.
 - `depth_mode`: "standard" (direct callers) or "deep" (adds `indirect_callers`, up to 3 levels)
+- `affected_functions` counts direct plus indirect callers; other functions in the same file are not counted. `unmapped_functions` counts the root and callers in files no project.md feature covers
 
 **trellis_get_graph**:
 - `project_id`: Project identifier
@@ -325,7 +327,7 @@ Re-analyze after implementing changes to catch unintended side effects. The code
 **trellis_trace_path**:
 - `from_feature`: Source feature or module (can be project.md feature name)
 - `to_feature`: Target feature or module
-- Returns: Direct and indirect call/import edges
+- Returns: Direct and one-hop call/import edges as `src_file:caller -> dst_file:callee (relation)`; `<module>` means a file-level import. Edges inside one file are left out; `shared_files` lists files both features cover
 
 **trellis_detect_hotspots**:
 - `project_id`: Project identifier
@@ -514,6 +516,9 @@ Read the relevant reference file before Phase 2 (Strategy) of the workflow.
 ### MCP server is not running
 - If tool calls fail immediately with a connection error, the `trellis-core` MCP server process is not running or is not reachable on the configured port.
 - Restart your agent/IDE; the server should start automatically if configured in `opencode.jsonc` or equivalent MCP settings.
+
+### "The index is still being built"
+- The engine is (re)building the index, for example once after a Trellis upgrade that changes the engine's index version. Wait a few seconds and call again; do not ask for a re-sync.
 
 ### Edges seem stale or callers are missing
 - The code graph can be wiped by background indexing. Ask the operator to re-run `trellis sync` after any unexpected results.

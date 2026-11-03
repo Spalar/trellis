@@ -60,6 +60,14 @@ def get_code_graph_path(project_path: Path) -> Path:
         except OSError:
             pass
 
+    if code_graph_dir.is_file() and not code_graph_dir.is_symlink():
+        # Typically a committed symlink (git mode 120000) checked out as a
+        # text file, e.g. on Windows without core.symlinks.
+        raise RuntimeError(
+            f"{code_graph_dir} is a file, not the index directory (often a committed "
+            "symlink checked out as text). Remove it (and `git rm --cached .code-graph`), "
+            "then re-sync the project."
+        )
     code_graph_dir.mkdir(parents=True, exist_ok=True)
     if code_graph_dir.is_symlink() or _is_junction(code_graph_dir):
         raise RuntimeError(

@@ -354,9 +354,10 @@ def test_trace_path_between_modules(project):
         project_path = root
 
     result = _trace_path(FakeBridge(), db, "backend/VIEWS.py", "services/billing.py")
-    assert {(e["from_file"], e["to_file"]) for e in result["direct_connections"]} == {
-        ("backend/views.py", "backend/services/billing.py")
-    }
+    assert {
+        tuple(side.split(":")[0] for side in e.split(" (")[0].split(" -> "))
+        for e in result["direct_connections"]
+    } == {("backend/views.py", "backend/services/billing.py")}
     assert "error" in _trace_path(FakeBridge(), db, "nowhere", "services/billing.py")
 
 

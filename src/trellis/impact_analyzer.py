@@ -61,7 +61,10 @@ class ImpactAnalyzer:
 
         callers = found["callers"]
         caller_files = {c["file_path"] for c in callers}
-        affected = callers + same_file
+        # What depends on the change: direct callers, then indirect ones
+        # (disjoint by construction). Other functions in the same file are
+        # not affected by it; same_file_functions lists them separately.
+        affected = callers + indirect
 
         feature_impacts = self._analyze_feature_impacts(root, affected)
         risk_level = self._calculate_risk(len(callers), len(caller_files), feature_impacts)
@@ -259,11 +262,11 @@ class ImpactAnalyzer:
         ]
         if other_features:
             pointers.append(
-                f"\nCross-feature impact: affects {len(other_features)} other features"
-            )
-            for fi in other_features:
-                pointers.append(
-                    f"  - {fi.feature_name}: {len(fi.impacted_functions)} functions"
+                "Cross-feature impact: "
+                + ", ".join(
+                    f"{fi.feature_name} ({len(fi.impacted_functions)} functions)"
+                    for fi in other_features
                 )
+            )
 
         return pointers
