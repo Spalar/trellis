@@ -110,7 +110,9 @@ The same 20 tools available over stdio then work over the network.
 - **Loopback binds** (`127.0.0.1`, the default): strict — Host/Origin are
   checked against a local allowlist (DNS-rebinding/CSRF defense). If
   `TRELLIS_API_KEY` is unset, a random per-launch token is minted and only the
-  served UI page receives it.
+  served UI page receives it. The bundled release instead keeps one token in
+  `<TRELLIS_DATA_DIR>/api-token` (created on first start, printed to stderr)
+  so HTTP MCP clients can reuse it across restarts.
 - **Network binds** (`0.0.0.0` or a non-loopback IP): Host/Origin checks are
   relaxed (the bearer token is the protection) and the token is **always**
   required — the server refuses to start on a network interface without

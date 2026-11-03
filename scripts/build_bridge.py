@@ -41,14 +41,28 @@ def update_vulnerable_dependencies(source_dir: Path) -> None:
         "rand",
     ]
 
-    print("[PATCH] Applying security updates to transitive dependencies...")
-    for crate in vulnerable_crates:
-        result = subprocess.run(
-            ["cargo", "update", "-p", crate],
+    def cargo_update(spec: str):
+        return subprocess.run(
+            ["cargo", "update", "-p", spec],
             cwd=source_dir,
             capture_output=True,
             text=True,
         )
+
+    print("[PATCH] Applying security updates to transitive dependencies...")
+    for crate in vulnerable_crates:
+        result = cargo_update(crate)
+        if result.returncode != 0 and "is ambiguous" in result.stderr:
+            # Several versions in the lockfile: cargo lists them as `name@x.y.z`.
+            specs = [
+                line.strip()
+                for line in result.stderr.splitlines()
+                if line.strip().startswith(f"{crate}@")
+            ]
+            failed = [spec for spec in specs if cargo_update(spec).returncode != 0]
+            if specs and not failed:
+                print(f"[PATCH] Updated {', '.join(specs)}")
+                continue
         if result.returncode != 0:
             print(f"[WARN] Could not update {crate}: {result.stderr.strip()}")
         else:

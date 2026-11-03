@@ -2,8 +2,9 @@
 
 import json
 import os
+import sqlite3
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 
 def get_trellis_data_dir() -> Path:
@@ -59,6 +60,14 @@ def get_code_graph_path(project_path: Path) -> Path:
         except OSError:
             pass
 
+    if code_graph_dir.is_file() and not code_graph_dir.is_symlink():
+        # Typically a committed symlink (git mode 120000) checked out as a
+        # text file, e.g. on Windows without core.symlinks.
+        raise RuntimeError(
+            f"{code_graph_dir} is a file, not the index directory (often a committed "
+            "symlink checked out as text). Remove it (and `git rm --cached .code-graph`), "
+            "then re-sync the project."
+        )
     code_graph_dir.mkdir(parents=True, exist_ok=True)
     if code_graph_dir.is_symlink() or _is_junction(code_graph_dir):
         raise RuntimeError(
@@ -227,16 +236,41 @@ def get_notes_path(project_path: Path) -> Path:
     return notes_dir
 
 
+_db_path_cache: Dict[Tuple[str, str], Path] = {}
+
+
 def resolve_code_graph_db(project_path: str) -> Path:
-    """Resolve the path to the code-graph SQLite database.
+    """Path to the project's code-graph SQLite index (`<repo>/.code-graph/index.db`).
 
-    This is the main entry point for finding the index.db file.
-
-    Args:
-        project_path: Path to the project repository
-
-    Returns:
-        Path to index.db
+    get_code_graph_path checks for links and writes the registry, so its
+    result is cached per project and data directory.
     """
-    code_graph_path = get_code_graph_path(Path(project_path))
-    return code_graph_path / "index.db"
+    key = (str(project_path), os.environ.get("TRELLIS_DATA_DIR", ""))
+    cached = _db_path_cache.get(key)
+    if cached is None or not cached.parent.is_dir():
+        cached = get_code_graph_path(Path(project_path)) / "index.db"
+        _db_path_cache[key] = cached
+    return cached
+
+
+def has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """True when `table` has `column` (older indexes lack e.g. edges.confidence)."""
+    return any(row[1] == column for row in conn.execute(f"PRAGMA table_info({table})"))
+
+
+_TEST_DIRS = {"tests", "test", "__tests__", "spec", "specs"}
+
+
+def is_test_path(path: str) -> bool:
+    """Heuristic: does this repo-relative path hold test code?"""
+    parts = path.replace("\\", "/").lower().split("/")
+    name = parts[-1]
+    stem = name.rsplit(".", 1)[0]
+    return (
+        any(part in _TEST_DIRS for part in parts[:-1])
+        or stem.startswith("test_")
+        or stem.endswith(("_test", "_tests"))
+        or stem in ("tests", "test", "conftest")
+        or ".test." in name
+        or ".spec." in name
+    )

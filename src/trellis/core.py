@@ -74,6 +74,28 @@ def truncate(text: str, limit: int) -> str:
     return text[:limit] + f"... [truncated, {len(text)} chars total]"
 
 
+def symbol_line(entry: Dict[str, Any]) -> str:
+    """One compact line for a symbol: 'path:start-end type name(sig) -> ret'.
+
+    Accepts engine search rows (file_path/start_line/end_line/signature) and
+    Trellis rows (file_path/line, qualified_name). A list of these lines costs
+    a fraction of the same rows as JSON objects.
+    """
+    path = entry.get("file_path") or entry.get("file") or "?"
+    start = entry.get("start_line") or entry.get("line")
+    end = entry.get("end_line")
+    where = f"{path}:{start}" if start else path
+    if end and start and end != start:
+        where += f"-{end}"
+    name = entry.get("qualified_name") or entry.get("name") or "?"
+    sig = " ".join(str(entry.get("signature") or "").split())
+    if sig and not sig.startswith("("):
+        sig = f" {sig}"
+    ret = entry.get("return_type")
+    kind = entry.get("type") or entry.get("kind")
+    return f"{where} {kind + ' ' if kind else ''}{name}{sig}{f' -> {ret}' if ret else ''}"
+
+
 def project_md_status(project_path) -> Dict[str, str]:
     """Report whether the repo root has a project.md feature spec.
 
@@ -369,7 +391,7 @@ def _require_registered(resolved: Path) -> None:
     registered = {Path(p).resolve() for p in list_registered_projects().values()}
     if resolved not in registered:
         raise ValueError(
-            f"'{resolved}' is not a registered project. Run trellis_sync on it first."
+            f"'{resolved}' is not a registered project. Ask the operator to index it first: `trellis sync <repo_path> --project-id <id>`."
         )
 
 
@@ -474,18 +496,28 @@ def _is_inside_trellis(path: Path, trellis_root: Path) -> bool:
 
 
 def get_bridge(project_id: str, allow_unregistered: bool = False) -> "CodeGraphBridge":
-    """Get or create bridge for project (LRU-bounded; evicted bridges close)."""
+    """Get or create bridge for project (LRU-bounded; evicted bridges close).
+
+    Ids that resolve to the same repo ('my-api', '/home/me/src/my-api')
+    share one bridge: two code-graph servers on one index fight over its
+    lock, and each one's zombie cleanup kills the other.
+    """
     if project_id not in _bridge_cache:
         from src.trellis import CodeGraphBridge
 
-        resolved = resolve_project_path(project_id, allow_unregistered)
-        _bridge_cache[project_id] = CodeGraphBridge(resolved)
+        resolved = Path(resolve_project_path(project_id, allow_unregistered)).resolve()
+        same_repo = next(
+            (b for b in _bridge_cache.values() if getattr(b, "project_path", None) == resolved),
+            None,
+        )
+        _bridge_cache[project_id] = same_repo or CodeGraphBridge(str(resolved))
         while len(_bridge_cache) > _BRIDGE_CACHE_MAX:
-            _old_key, _old_bridge = _bridge_cache.popitem(last=False)
-            try:
-                _old_bridge.close()
-            except Exception:
-                pass
+            _old_key, old = _bridge_cache.popitem(last=False)
+            if not any(b is old for b in _bridge_cache.values()):
+                try:
+                    old.close()
+                except Exception:
+                    pass
     _bridge_cache.move_to_end(project_id)
     return _bridge_cache[project_id]
 
@@ -497,7 +529,19 @@ def evict_bridge(project_id: str) -> None:
     removed so the bridge cache does not hold a stale index handle.
     """
     bridge = _bridge_cache.pop(project_id, None)
+    if bridge is None:
+        # Cached under another alias of the same repo (id vs path)?
+        try:
+            resolved = Path(resolve_project_path(project_id, allow_unregistered=True)).resolve()
+        except (ValueError, OSError):
+            resolved = None
+        bridge = next(
+            (b for b in _bridge_cache.values() if getattr(b, "project_path", None) == resolved),
+            None,
+        )
     if bridge is not None:
+        for alias in [k for k, b in _bridge_cache.items() if b is bridge]:
+            del _bridge_cache[alias]
         try:
             bridge.close()
         except Exception:
@@ -527,18 +571,19 @@ def sync_guidance(job: dict, index_exists: bool) -> str:
         )
         return (
             f"Sync is RUNNING (started {secs}s ago). Keep waiting — check this "
-            "tool again; do NOT re-issue trellis_sync."
+            "tool again; do NOT start another sync."
         )
     if job and job.get("state") == "failed":
         return (
-            f"Last sync FAILED: {job.get('detail', '')}. Fix and re-run trellis_sync."
+            f"Last sync FAILED: {job.get('detail', '')}. Ask the operator to re-run "
+            "`trellis sync <repo_path> --project-id <id>`."
         )
     if job and job.get("state") == "completed":
         return "Index ready — proceed with trellis_list_modules etc."
     if not job and not index_exists:
         return (
-            "No index yet — run trellis_sync (background mode) or "
-            "trellis.exe sync <repo> --project-id <id>."
+            "No index yet — ask the operator to run "
+            "`trellis sync <repo_path> --project-id <id>`."
         )
     return "Index exists and no sync is running."
 

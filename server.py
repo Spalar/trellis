@@ -32,7 +32,7 @@ if os.environ.get("FASTMCP_SHOW_SERVER_BANNER") is None:
 if os.environ.get("FASTMCP_LOG_LEVEL") is None:
     os.environ["FASTMCP_LOG_LEVEL"] = "ERROR"
 
-VERSION = "0.4.1"
+VERSION = "0.5.0"
 
 from src.trellis import core  # noqa: E402
 from src.trellis.api import create_api_app  # noqa: E402
@@ -69,6 +69,14 @@ def _require_key_for_network_bind(host: str | None = None) -> None:
     sys.exit(2)
 
 
+def _bundle_token() -> None:
+    """Bundled release serving HTTP: require a token (see launcher)."""
+    if getattr(sys, "frozen", False):
+        from src.trellis.launcher import ensure_api_token
+
+        ensure_api_token()
+
+
 def _run_mcp() -> None:
     """Run the FastMCP server: stdio by default, HTTP via TRELLIS_TRANSPORT.
 
@@ -103,6 +111,7 @@ def _run_mcp() -> None:
         import uvicorn
 
         app = create_ui_app(create_api_app(VERSION), VERSION, mcp_app=mcp.http_app())
+        _bundle_token()
         _require_key_for_network_bind()
         uvicorn.run(
             core.LocalHttpGuard(app),
@@ -124,6 +133,7 @@ def _run_api() -> None:
     import uvicorn
 
     app = create_api_app(VERSION)
+    _bundle_token()
     _require_key_for_network_bind()
     uvicorn.run(
         app,
@@ -146,6 +156,7 @@ def _run_ui() -> None:
     import uvicorn
 
     app = create_ui_app(create_api_app(VERSION), VERSION)
+    _bundle_token()
     _require_key_for_network_bind()
     uvicorn.run(
         app,

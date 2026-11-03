@@ -112,7 +112,7 @@ class TestJSGraphAugmentor:
             assert result["command_calls"] > 0
             assert result["instantiation_uses"] > 0
 
-    def test_command_call_edges_in_db(self, db_path):
+    def test_command_call_edges_in_db(self, bridge, db_path):  # bridge: sync + augment first
         conn = sqlite3.connect(str(db_path))
         try:
             c = conn.cursor()
@@ -133,7 +133,7 @@ class TestJSGraphAugmentor:
         finally:
             conn.close()
 
-    def test_instantiation_edges_in_db(self, db_path):
+    def test_instantiation_edges_in_db(self, bridge, db_path):  # bridge: sync + augment first
         conn = sqlite3.connect(str(db_path))
         try:
             c = conn.cursor()

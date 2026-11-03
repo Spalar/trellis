@@ -375,6 +375,17 @@ class SecurityScanner:
             "Rust process execution",
             "read-only git metadata commands (rev-parse, ls-remote); no shell, no user-controlled args",
         ),
+        # --- code-graph-mcp v0.184.0 (upstream, reviewed at pull upgrade) ---
+        (
+            r"\bCommand::new\(\"mkfifo\"\)",
+            "Rust Command creation",
+            "#[cfg(test)] in storage/db.rs: makes a FIFO to test that a non-regular index.db is refused",
+        ),
+        (
+            r"\bCommand::new\(\"mkfifo\"\)",
+            "Rust process execution",
+            "#[cfg(test)] in storage/db.rs: makes a FIFO to test that a non-regular index.db is refused",
+        ),
         (
             r"\bCommand::new\(\"gh\"\)",
             "Rust Command creation",
@@ -548,6 +559,13 @@ class SecurityScanner:
         for skip in skip_paths:
             if skip in path_str:
                 return True
+        # Upstream engine developer kits: Python benchmark/review harnesses
+        # and transcript tools run by hand. Not part of the crate or binary.
+        if (self.project_root / "Cargo.toml").exists() and (
+            rel_path.parts[:1] in (("tasks",), ("evals",))
+            or (rel_path.parts[:1] == ("scripts",) and file_path.suffix == ".py")
+        ):
+            return True
 
         skip_extensions = {
             ".md",
@@ -645,8 +663,33 @@ def run_cargo_audit(source_dir: Path, skip: bool = False) -> bool:
             print("[FAIL] Could not install cargo-audit")
             return False
 
+    # Advisories in crates that only the `embed-model` feature pulls in.
+    # Trellis builds the engine with --no-default-features (offline, no
+    # model download), so these crates are not in its binary. Each is
+    # ignored only after `cargo tree` confirms that for the build we ship.
+    feature_only = {
+        # zip 7.2.0 `extract()`, via candle-core (upstream CI ignores the same).
+        "RUSTSEC-2026-0367": "zip",
+        "RUSTSEC-2026-0368": "zip",
+        "RUSTSEC-2026-0369": "zip",
+        "RUSTSEC-2026-0429": "zip",
+    }
+    ignore_args: List[str] = []
+    for advisory, crate in feature_only.items():
+        tree = subprocess.run(
+            ["cargo", "tree", "--no-default-features", "-e", "normal", "-i", crate],
+            cwd=source_dir,
+            capture_output=True,
+            text=True,
+        )
+        if tree.returncode != 0 and "did not match any packages" in tree.stderr:
+            ignore_args += ["--ignore", advisory]
+            print(f"[INFO] {advisory} ({crate}) ignored: not in the --no-default-features build")
+        else:
+            print(f"[WARN] {advisory}: {crate} is in the shipped build; not ignored")
+
     result = subprocess.run(
-        ["cargo", "audit"],
+        ["cargo", "audit", *ignore_args],
         cwd=source_dir,
         capture_output=True,
         text=True,

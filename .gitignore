@@ -130,3 +130,8 @@ Thumbs.db
 # Entire eval folder is local-only utility; do not commit
 eval/
 .code-graph/
+
+# Local server/test logs
+test_*.out
+test_*.err
+

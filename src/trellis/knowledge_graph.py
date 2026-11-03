@@ -106,6 +106,7 @@ class NoteGraph:
 
         self.notes: Dict[str, Note] = {}
         self.edges: List[GraphEdge] = []
+        self._aliases: Optional[Dict[str, str]] = None  # rebuilt after changes
         self._load_all_notes()
 
     def _normalize_link(self, text: str) -> str:
@@ -113,7 +114,9 @@ class NoteGraph:
         return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
     def _build_alias_index(self) -> Dict[str, str]:
-        """Map common aliases (titles, slugs) to note IDs."""
+        """Map common aliases (titles, slugs) to note IDs (cached until a note changes)."""
+        if self._aliases is not None:
+            return self._aliases
         aliases: Dict[str, str] = {}
 
         for note_id, note in self.notes.items():
@@ -132,6 +135,8 @@ class NoteGraph:
                         aliases[self._normalize_link(rest)] = note_id
                         aliases[rest.lower()] = note_id
 
+        aliases.pop("", None)  # titles with no ASCII letters slug to ""
+        self._aliases = aliases
         return aliases
 
     def _resolve_link(self, target: str) -> Optional[str]:
@@ -156,10 +161,13 @@ class NoteGraph:
         if slug in aliases:
             return aliases[slug]
 
-        # Partial slug match (last resort)
-        if slug:
+        # Partial slug match (last resort), on whole words only:
+        # [[auth]] may mean "feature-auth" but not "oauth".
+        if len(slug) >= 3:
             for alias, note_id in aliases.items():
-                if alias.endswith(slug) or slug.endswith(alias):
+                if len(alias) >= 3 and (
+                    alias.endswith("-" + slug) or slug.endswith("-" + alias)
+                ):
                     return note_id
 
         return None
@@ -221,7 +229,7 @@ class NoteGraph:
                         if key == "title":
                             title = val
                         elif key == "tags":
-                            tags = [t.strip() for t in val.split(",")]
+                            tags = [t.strip() for t in val.split(",") if t.strip()]
                         elif key == "created":
                             created = val
                         elif key == "updated":
@@ -241,15 +249,24 @@ class NoteGraph:
         )
 
         self.notes[note.id] = note
+        self._aliases = None
         return note
 
     def save_note(
         self, note_id: str, content: str, title: str = None, tags: List[str] = None
     ) -> Note:
-        """Save or update a note."""
+        """Save or update a note.
+
+        On update, a title or tags left as None keep their current values,
+        and the created date is kept.
+        """
         path = _note_path(self.notes_dir, note_id)
 
         now = datetime.now().isoformat()
+        existing = self.get_note(note_id) if path.exists() else None
+        if existing:
+            title = title or existing.title
+            tags = existing.tags if tags is None else tags
 
         # Strip newlines so injected title/tags cannot forge frontmatter keys.
         safe_title = (title or note_id).replace("\r", " ").replace("\n", " ")
@@ -260,6 +277,10 @@ class NoteGraph:
         frontmatter.append(f"title: {safe_title}")
         if safe_tags:
             frontmatter.append(f"tags: {', '.join(safe_tags)}")
+        if existing and existing.created_at:
+            frontmatter.append(f"created: {existing.created_at}")
+        else:
+            frontmatter.append(f"created: {now}")
         frontmatter.append(f"updated: {now}")
         frontmatter.append("---")
         frontmatter.append("")
@@ -289,6 +310,7 @@ class NoteGraph:
             path.unlink()
             if note_id in self.notes:
                 del self.notes[note_id]
+            self._aliases = None
             return True
         return False
 

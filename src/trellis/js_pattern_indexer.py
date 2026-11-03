@@ -17,6 +17,7 @@ Patterns detected:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -85,55 +86,83 @@ class JsPatternIndexer:
         self._parser = Parser(self._language)
         self.edges: List[SyntheticEdge] = []
         self.commands: Dict[str, CommandRegistration] = {}
-        self.components: Dict[str, ComponentMapping] = {}
+        self.components: Dict[str, ComponentMapping] = {}  # key -> last call site
+        self.component_calls: List[ComponentMapping] = []  # every call site
+        # file -> local name -> module specifier, from `import X from '...'`
+        self.imports: Dict[str, Dict[str, str]] = {}
         self.properties: Dict[str, List[PropertyMapping]] = {}
         self.instantiations: Dict[str, List[Tuple[str, int]]] = {}
         self.command_name_map: Dict[str, str] = {}
         self.component_name_map: Dict[str, str] = {}
         self.object_maps: Dict[str, Dict[str, str]] = {}
 
+    # Never source code worth scanning: dependencies, VCS, envs, build output.
+    _SKIP_DIRS = {"node_modules", "bower_components", "venv", "env", "dist", "build", "out", "__pycache__"}
+
     def index(self, paths: Optional[List[Path]] = None) -> "JsPatternIndexer":
-        """Index JS files under project_path or the provided paths."""
-        # First resolve commandNames/componentNames constants and class maps
-        # so later patterns can map `commandNames.APPLY_FILTER` -> `applyFilter`
-        # and `new SUB_UI_COMPONENT[name]()` -> all mapped class names.
-        self._resolve_constants()
+        """Index JS files under project_path or the provided paths.
 
+        Pass the files code-graph indexed when known; otherwise the tree is
+        walked, skipping hidden, dependency and build directories. Each file
+        is parsed once per run.
+        """
         if paths is None:
-            paths = list(self.project_path.rglob("*.js"))
+            paths = self._discover()
+        paths = [p for p in paths if "node_modules" not in p.parts]
+        self._trees: Dict[Path, Optional[Tuple[str, object]]] = {}
+        try:
+            # First resolve commandNames/componentNames constants and class maps
+            # so later patterns can map `commandNames.APPLY_FILTER` -> `applyFilter`
+            # and `new SUB_UI_COMPONENT[name]()` -> all mapped class names.
+            self._resolve_constants(paths)
 
-        # Pre-pass: collect class/object maps (e.g. SUB_UI_COMPONENT = { Shape, ... })
-        for path in paths:
-            if "node_modules" in path.parts:
-                continue
-            self._index_object_maps(path)
+            # Pre-pass: collect class/object maps (e.g. SUB_UI_COMPONENT = { Shape, ... })
+            for path in paths:
+                self._index_object_maps(path)
 
-        # First pass: collect command registrations so second pass can resolve
-        # dynamic invocations like `this.execute(commands.CLEAR_OBJECTS)`.
-        for path in paths:
-            if "node_modules" in path.parts:
-                continue
-            self._index_file(path, registrations_only=True)
+            # First pass: collect command registrations so second pass can resolve
+            # dynamic invocations like `this.execute(commands.CLEAR_OBJECTS)`.
+            for path in paths:
+                self._index_file(path, registrations_only=True)
 
-        # Second pass: detect executions, instantiations, components, properties.
-        for path in paths:
-            if "node_modules" in path.parts:
-                continue
-            self._index_file(path, registrations_only=False)
+            # Second pass: detect executions, instantiations, components, properties.
+            for path in paths:
+                self._index_file(path, registrations_only=False)
+        finally:
+            self._trees = {}  # parse trees are large; drop them after the run
 
         return self
+
+    def _discover(self) -> List[Path]:
+        found: List[Path] = []
+        for root, dirs, files in os.walk(self.project_path):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in self._SKIP_DIRS]
+            found += [Path(root) / f for f in files if f.endswith(".js")]
+        return found
+
+    def _parsed(self, path: Path) -> Optional[Tuple[str, object]]:
+        """(source, tree) for a file, parsed once per index() run."""
+        cache = getattr(self, "_trees", None)
+        if cache is not None and path in cache:
+            return cache[path]
+        try:
+            source = path.read_text(encoding="utf-8")
+            result = (source, self._parser.parse(source.encode("utf-8")))
+        except Exception:
+            result = None
+        if cache is not None:
+            cache[path] = result
+        return result
 
     def _index_object_maps(self, path: Path) -> None:
         """Collect object literals that map names to class identifiers.
 
         Example: const SUB_UI_COMPONENT = { Shape, Crop, Resize, ... };
         """
-        try:
-            source = path.read_text(encoding="utf-8")
-        except Exception:
+        parsed = self._parsed(path)
+        if parsed is None:
             return
-
-        tree = self._parser.parse(source.encode("utf-8"))
+        source, tree = parsed
 
         def _walk_maps(node: Node) -> None:
             if node.type in (
@@ -195,19 +224,40 @@ class JsPatternIndexer:
                 _walk_maps(child)
 
         _walk_maps(tree.root_node)
+        self._index_imports(path, source, tree.root_node)
 
-    def _resolve_constants(self) -> None:
+    def _index_imports(self, path: Path, source: str, root: Node) -> None:
+        """Record `import X from 'm'` / `import { X as Y } from 'm'` bindings."""
+        bindings: Dict[str, str] = {}
+        for stmt in root.children:
+            if stmt.type != "import_statement":
+                continue
+            spec_node = stmt.child_by_field_name("source")
+            if spec_node is None:
+                continue
+            spec = self._node_text(spec_node, source).strip("\"'`")
+            for clause in stmt.children:
+                if clause.type != "import_clause":
+                    continue
+                for part in clause.children:
+                    if part.type == "identifier":  # default import
+                        bindings[self._node_text(part, source)] = spec
+                    elif part.type == "named_imports":
+                        for item in part.children:
+                            if item.type == "import_specifier":
+                                local = item.child_by_field_name("alias") or item.child_by_field_name("name")
+                                if local is not None:
+                                    bindings[self._node_text(local, source)] = spec
+        if bindings:
+            rel = path.relative_to(self.project_path).as_posix()
+            self.imports[rel] = bindings
+
+    def _resolve_constants(self, paths: List[Path]) -> None:
         """Find commandNames / componentMaps declarations and build maps."""
-        for path in self.project_path.rglob("*.js"):
-            if "node_modules" in path.parts:
-                continue
-            try:
-                source = path.read_text(encoding="utf-8")
-            except Exception:
-                continue
-
-            tree = self._parser.parse(source.encode("utf-8"))
-            self._extract_constant_maps(tree.root_node, source)
+        for path in paths:
+            parsed = self._parsed(path)
+            if parsed is not None:
+                self._extract_constant_maps(parsed[1].root_node, parsed[0])
 
     def _extract_constant_maps(self, node: Node, source: str) -> None:
         """Extract export const commandNames = {...} and keyMirror(...) maps."""
@@ -299,12 +349,10 @@ class JsPatternIndexer:
 
     def _index_file(self, path: Path, registrations_only: bool = False) -> None:
         """Parse a single JS file and extract patterns."""
-        try:
-            source = path.read_text(encoding="utf-8")
-        except Exception:
+        parsed = self._parsed(path)
+        if parsed is None:
             return
-
-        tree = self._parser.parse(source.encode("utf-8"))
+        source, tree = parsed
         local_objects = self._build_local_object_map(tree.root_node, source)
         self._walk(
             tree.root_node,
@@ -574,12 +622,14 @@ class JsPatternIndexer:
         class_name = self._component_key_to_class(component_key)
         line, col = self._node_location(node, path)
         rel_path = path.relative_to(self.project_path).as_posix()
-        self.components[component_key] = ComponentMapping(
+        mapping = ComponentMapping(
             component_key=component_key,
             class_name=class_name,
             file_path=rel_path,
             line=line,
         )
+        self.components[component_key] = mapping
+        self.component_calls.append(mapping)
 
     def _detect_instantiation(
         self, node: Node, path: Path, source: str, local_objects: Dict[str, Node]

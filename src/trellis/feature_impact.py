@@ -13,9 +13,44 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from .bridge import CodeGraphBridge
+
+
+def glob_to_regex(pattern: str) -> "re.Pattern[str]":
+    """Compile a project.md file pattern.
+
+    `**` spans directories, `*` and `?` stay within one path segment. The
+    pattern may match from any directory boundary, and a directory pattern
+    (`src/auth`, `src/auth/`) also matches everything below it.
+    """
+    pattern = pattern.strip().replace("\\", "/")
+    while pattern.startswith("./"):
+        pattern = pattern[2:]
+    pattern = pattern.strip("/")
+    body, i = [], 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            body.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            body.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            body.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            body.append("[^/]")
+            i += 1
+        else:
+            body.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("(?:^|/)" + "".join(body) + "(?:/.*)?$")
+
+
+# spec path -> ((mtime_ns, size), features)
+_spec_cache: Dict[str, Tuple[Tuple[int, int], Dict[str, "FeatureSpec"]]] = {}
 
 
 @dataclass
@@ -42,6 +77,19 @@ class FeatureSpec:
     owner: str = ""  # Team or person responsible
     status: str = "active"  # active, deprecated, planned
 
+    def matches(self, file_path: str) -> bool:
+        """Does any of this feature's file patterns cover `file_path`?"""
+        path = file_path.replace("\\", "/")
+        return any(regex.search(path) for regex in self._regexes())
+
+    def _regexes(self) -> List["re.Pattern[str]"]:
+        key = tuple(self.file_patterns)
+        cached = self.__dict__.get("_compiled")
+        if not cached or cached[0] != key:
+            cached = (key, [glob_to_regex(p) for p in self.file_patterns if p.strip()])
+            self.__dict__["_compiled"] = cached
+        return cached[1]
+
 
 @dataclass
 class FeatureImpact:
@@ -62,7 +110,17 @@ class ProjectContextParser:
         self.project_path = Path(project_path)
         self.spec_file = self.project_path / "project.md"
         self.features: Dict[str, FeatureSpec] = {}
+        try:
+            st = self.spec_file.stat()
+            stamp = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return
+        cached = _spec_cache.get(str(self.spec_file))
+        if cached and cached[0] == stamp:
+            self.features = cached[1]
+            return
         self._parse()
+        _spec_cache[str(self.spec_file)] = (stamp, self.features)
 
     def _parse(self) -> None:
         """Parse project.md and extract features.
@@ -244,31 +302,65 @@ class ProjectContextParser:
                     current_feature.description += " " + line_stripped
 
     def get_feature_for_file(self, file_path: str) -> Optional[FeatureSpec]:
-        """Find which feature owns a file.
-
-        Args:
-            file_path: Path to source file
-
-        Returns:
-            FeatureSpec if found, None otherwise
-        """
+        """The first feature (in project.md order) whose patterns cover the file."""
         for feature in self.features.values():
-            for pattern in feature.file_patterns:
-                # Convert glob to regex; skip patterns that fail to compile
-                # (project.md is repo content and may contain regex
-                # metacharacters — an invalid pattern must not break every
-                # feature tool for the whole project).
-                regex_pattern = pattern.replace("**", ".*").replace("*", "[^/]*")
-                try:
-                    if re.search(regex_pattern, file_path):
-                        return feature
-                except re.error:
-                    continue
+            if feature.matches(file_path):
+                return feature
         return None
+
+    def files_for_feature(self, feature_name: str, paths: Iterable[str]) -> List[str]:
+        """The subset of `paths` covered by the feature's file patterns."""
+        feature = self.features.get(feature_name)
+        return [p for p in paths if feature.matches(p)] if feature else []
 
     def get_all_features(self) -> Dict[str, FeatureSpec]:
         """Get all parsed features."""
         return self.features
+
+
+def analyze_feature_risks(context: "ProjectContextParser", impact: FeatureImpact) -> None:
+    """Fill a feature impact's affected decisions, risk flags and recommendations."""
+    feature = context.features.get(impact.feature_name)
+    if not feature:
+        return
+
+    # Decisions whose constraints touch sensitive areas
+    keywords = ("auth", "security", "performance", "api", "contract")
+    if impact.impacted_functions:
+        impact.affected_decisions = [
+            d
+            for d in feature.decisions
+            if any(k in c.lower() for c in d.constraints for k in keywords)
+        ]
+
+    # Check for feature-level risk flags
+    root_funcs = [f for f in impact.impacted_functions if f.get("is_root")]
+    if root_funcs:
+        impact.risk_flags.append(
+            f"Root function change affects {len(impact.impacted_functions)} functions"
+        )
+
+    # Check if feature is deprecated
+    if feature.status == "deprecated":
+        impact.risk_flags.append(
+            "Feature is deprecated - changes may indicate migration needed"
+        )
+
+    # Generate recommendations
+    if impact.affected_decisions:
+        impact.recommended_actions.append(
+            "Review affected decisions in project.md before committing changes"
+        )
+
+    if len(impact.impacted_functions) > 10:
+        impact.recommended_actions.append(
+            "Large blast radius - consider breaking into smaller changes"
+        )
+
+    if not feature.file_patterns:
+        impact.recommended_actions.append(
+            "Feature has no file patterns defined - add to project.md for better tracking"
+        )
 
 
 class FeatureImpactAnalyzer:
@@ -282,143 +374,6 @@ class FeatureImpactAnalyzer:
         self.bridge = bridge
         self.project_path = Path(project_path)
         self.context = ProjectContextParser(project_path)
-
-    def analyze_feature_impact(
-        self, symbol: str, depth: int = 2
-    ) -> List[FeatureImpact]:
-        """Analyze impact of changing a symbol at feature level.
-
-        Returns:
-            List of FeatureImpact objects, one per affected feature
-        """
-        # 1. Get technical impact from code-graph-mcp
-        technical_impact = self.bridge.analyze_impact(symbol, depth=depth)
-
-        # 2. Get affected functions
-        affected_functions = technical_impact.get("affected_functions", [])
-
-        # 3. Group by feature
-        feature_impacts: Dict[str, FeatureImpact] = {}
-
-        # Add the changed function itself
-        root_func = self.bridge.get_ast_node(symbol)
-        if root_func:
-            self._add_function_to_impact(root_func, feature_impacts, is_root=True)
-
-        # Add all affected functions
-        for func in affected_functions:
-            self._add_function_to_impact(func, feature_impacts)
-
-        # 4. Analyze each feature for risks
-        for impact in feature_impacts.values():
-            self._analyze_feature_risks(impact)
-
-        return list(feature_impacts.values())
-
-    def _add_function_to_impact(
-        self,
-        func: Dict,
-        feature_impacts: Dict[str, FeatureImpact],
-        is_root: bool = False,
-    ) -> None:
-        """Add a function to its feature's impact."""
-        file_path = func.get("file_path", "")
-        if not file_path:
-            return
-
-        # Find which feature this file belongs to
-        feature = self.context.get_feature_for_file(file_path)
-
-        if feature:
-            feature_name = feature.feature_name
-
-            if feature_name not in feature_impacts:
-                feature_impacts[feature_name] = FeatureImpact(feature_name=feature_name)
-
-            func_info = {
-                "name": func.get("name", "unknown"),
-                "qualified_name": func.get("qualified_name", ""),
-                "file_path": file_path,
-                "is_root": is_root,
-            }
-
-            feature_impacts[feature_name].impacted_functions.append(func_info)
-
-        else:
-            # No feature found - might be a shared/util file
-            if "unassigned" not in feature_impacts:
-                feature_impacts["unassigned"] = FeatureImpact(
-                    feature_name="unassigned",
-                    risk_flags=["Function not mapped to any feature in project.md"],
-                )
-
-            feature_impacts["unassigned"].impacted_functions.append(
-                {
-                    "name": func.get("name", "unknown"),
-                    "file_path": file_path,
-                    "is_root": is_root,
-                }
-            )
-
-    def _analyze_feature_risks(self, impact: FeatureImpact) -> None:
-        """Analyze risks for a feature based on its impacted functions."""
-        feature = self.context.features.get(impact.feature_name)
-        if not feature:
-            return
-
-        # Check for affected decisions
-        for decision in feature.decisions:
-            # If any constraint is related to the changed files, flag it
-            for constraint in decision.constraints:
-                for func in impact.impacted_functions:
-                    # Simple keyword matching - could be more sophisticated
-                    if any(
-                        keyword in constraint.lower()
-                        for keyword in [
-                            "auth",
-                            "security",
-                            "performance",
-                            "api",
-                            "contract",
-                        ]
-                    ):
-                        impact.affected_decisions.append(decision)
-                        break
-
-        # Check for feature-level risk flags
-        root_funcs = [f for f in impact.impacted_functions if f.get("is_root")]
-        if root_funcs:
-            impact.risk_flags.append(
-                f"Root function change affects {len(impact.impacted_functions)} functions"
-            )
-
-        # Check if feature is deprecated
-        if feature.status == "deprecated":
-            impact.risk_flags.append(
-                "Feature is deprecated - changes may indicate migration needed"
-            )
-
-        # Check dependencies
-        if feature.dependencies:
-            impact.risk_flags.append(
-                f"Feature has {len(feature.dependencies)} dependencies: {', '.join(feature.dependencies)}"
-            )
-
-        # Generate recommendations
-        if impact.affected_decisions:
-            impact.recommended_actions.append(
-                "Review affected decisions in project.md before committing changes"
-            )
-
-        if len(impact.impacted_functions) > 10:
-            impact.recommended_actions.append(
-                "Large blast radius - consider breaking into smaller changes"
-            )
-
-        if not feature.file_patterns:
-            impact.recommended_actions.append(
-                "Feature has no file patterns defined - add to project.md for better tracking"
-            )
 
     def check_divergence(self, symbol: str) -> List[str]:
         """Check if a function diverges from its feature spec.
@@ -542,83 +497,3 @@ class FeatureImpactAnalyzer:
             )
 
         return pointers
-
-    def generate_feature_report(self, symbol: str, depth: int = 2) -> Dict:
-        """Generate comprehensive feature impact report.
-
-        Returns:
-            Structured report with technical + feature impact
-        """
-        # Get technical impact
-        technical = self.bridge.analyze_impact(symbol, depth=depth)
-
-        # Get feature impacts
-        feature_impacts = self.analyze_feature_impact(symbol, depth=depth)
-
-        # Get divergence warnings
-        divergence = self.check_divergence(symbol)
-
-        # Get development pointers
-        pointers = self.get_development_pointers(symbol)
-
-        return {
-            "symbol": symbol,
-            "technical_impact": technical,
-            "feature_impacts": [
-                {
-                    "feature_name": fi.feature_name,
-                    "impacted_functions": fi.impacted_functions,
-                    "affected_decisions": [
-                        {"id": d.decision_id, "description": d.description}
-                        for d in fi.affected_decisions
-                    ],
-                    "risk_flags": fi.risk_flags,
-                    "recommended_actions": fi.recommended_actions,
-                }
-                for fi in feature_impacts
-            ],
-            "divergence_warnings": divergence,
-            "development_pointers": pointers,
-            "summary": self._generate_summary(symbol, feature_impacts, divergence),
-        }
-
-    def _generate_summary(
-        self, symbol: str, feature_impacts: List[FeatureImpact], divergence: List[str]
-    ) -> str:
-        """Generate human-readable summary."""
-        lines = [f"Feature Impact Analysis: {symbol}"]
-        lines.append("")
-
-        total_features = len(
-            [fi for fi in feature_impacts if fi.feature_name != "unassigned"]
-        )
-        total_funcs = sum(len(fi.impacted_functions) for fi in feature_impacts)
-
-        lines.append(
-            f"Affects {total_funcs} functions across {total_features} features"
-        )
-
-        for fi in feature_impacts:
-            if fi.feature_name == "unassigned":
-                continue
-
-            lines.append(f"\n📦 Feature: {fi.feature_name}")
-            lines.append(f"   Functions: {len(fi.impacted_functions)}")
-
-            if fi.affected_decisions:
-                lines.append(f"   ⚠️  Affected decisions: {len(fi.affected_decisions)}")
-
-            if fi.risk_flags:
-                for flag in fi.risk_flags:
-                    lines.append(f"   ⚠️  {flag}")
-
-            if fi.recommended_actions:
-                for action in fi.recommended_actions:
-                    lines.append(f"   💡 {action}")
-
-        if divergence:
-            lines.append("\n🚨 Divergence Warnings:")
-            for warning in divergence:
-                lines.append(f"   {warning}")
-
-        return "\n".join(lines)

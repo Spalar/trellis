@@ -11,7 +11,7 @@ build_release.py):
     code-graph-mcp-linux-arm64
     checksums.sha256
 
-Downstream consumers (e.g. FlowState's docker/trellis.Dockerfile) download
+Downstream consumers (e.g. a Dockerfile that bundles the engine) download
 them from:
     https://github.com/Spalar/trellis/releases/download/<tag>/code-graph-mcp-linux-<arch>
 
@@ -56,7 +56,7 @@ REPO_SLUG = "Spalar/trellis"
 
 # Deliberate fast-build profile override: the upstream profile's fat LTO +
 # single codegen unit multiplies build time for an I/O-bound sidecar (same
-# override FlowState uses for source builds).
+# override recommended for source builds).
 FAST_BUILD_EXPORTS = (
     "export CARGO_PROFILE_RELEASE_LTO=false && "
     "export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 && "

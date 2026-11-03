@@ -103,7 +103,7 @@ def create_api_app(version: str) -> FastAPI:
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
-    @app.get("/graph/{project_id}/impact/{symbol}")
+    @app.get("/graph/{project_id}/impact/{symbol:path}")
     async def graph_impact(project_id: str, symbol: str):
         """Get impact graph."""
         try:
@@ -113,7 +113,7 @@ def create_api_app(version: str) -> FastAPI:
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
-    @app.get("/feature/{project_id}/impact/{symbol}")
+    @app.get("/feature/{project_id}/impact/{symbol:path}")
     async def feature_impact(project_id: str, symbol: str):
         """Get feature impact report."""
         try:
@@ -123,7 +123,7 @@ def create_api_app(version: str) -> FastAPI:
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
-    @app.get("/feature/{project_id}/pointers/{symbol}")
+    @app.get("/feature/{project_id}/pointers/{symbol:path}")
     async def feature_pointers(project_id: str, symbol: str):
         """Get development pointers."""
         try:
@@ -133,7 +133,7 @@ def create_api_app(version: str) -> FastAPI:
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
-    @app.get("/feature/{project_id}/context/{symbol}")
+    @app.get("/feature/{project_id}/context/{symbol:path}")
     async def feature_context(project_id: str, symbol: str):
         """Get feature context for a symbol."""
         try:
@@ -145,7 +145,7 @@ def create_api_app(version: str) -> FastAPI:
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
-    @app.get("/feature/{project_id}/divergence/{symbol}")
+    @app.get("/feature/{project_id}/divergence/{symbol:path}")
     async def feature_divergence(project_id: str, symbol: str):
         """Check feature divergence for a symbol."""
         try:
@@ -225,7 +225,6 @@ def create_api_app(version: str) -> FastAPI:
         """
         try:
             from src.trellis.feature_impact import ProjectContextParser
-            from src.trellis.utils import resolve_code_graph_db
 
             bridge = core.get_bridge(project_id)
             parser = await asyncio.to_thread(
@@ -234,31 +233,14 @@ def create_api_app(version: str) -> FastAPI:
             features = parser.get_all_features()
 
             # All indexed source files from the code graph DB
-            files = []
-            db_path = resolve_code_graph_db(str(bridge.project_path))
-            if db_path.exists():
-                import sqlite3
-
-                conn = sqlite3.connect(str(db_path))
-                files = [row[0] for row in conn.execute("SELECT path FROM files")]
-                conn.close()
-
-            def match_files(patterns):
-                matched = []
-                for path in files:
-                    for pattern in patterns:
-                        regex = pattern.replace("**", ".*").replace("*", "[^/]*")
-                        if re.search(regex, path):
-                            matched.append(path)
-                            break
-                return matched
+            files = await asyncio.to_thread(bridge.indexed_paths)
 
             feature_rows = []
             covered_files = set()
             for name, feature in features.items():
-                matched = match_files(feature.file_patterns)
+                matched = parser.files_for_feature(name, files)
                 covered_files.update(matched)
-                functions = await asyncio.to_thread(bridge.get_feature_functions, name)
+                functions = await asyncio.to_thread(bridge.functions_in_files, matched)
                 issues = []
                 if not feature.file_patterns:
                     issues.append("no file patterns - add a '### Files' section")
@@ -355,8 +337,9 @@ def create_api_app(version: str) -> FastAPI:
 
             body = await request.json()
             content = body.get("content", "")
-            title = body.get("title", note_id)
-            tags = body.get("tags", [])
+            # Omitted title/tags keep the note's current values on update.
+            title = body.get("title")
+            tags = body.get("tags")
             resolved = core.resolve_project_path(project_id)
             graph = await asyncio.to_thread(NoteGraph, resolved)
             note = await asyncio.to_thread(

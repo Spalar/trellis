@@ -39,6 +39,8 @@ Analyzes how code changes impact feature-level decisions and constraints.
 - src/trellis/feature_impact.py
 - src/trellis/impact_analyzer.py
 - src/trellis/python_call_indexer.py
+- src/trellis/graph_queries.py
+- src/trellis/django_routes.py
 - tests/project.md
 
 ### Dependencies

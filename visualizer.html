@@ -2611,13 +2611,15 @@ async function analyzeImpact() {
   
   try {
     // Use qualified_name if available to disambiguate functions with same name in different classes
-    const symbolName = currentNode.qualified_name || currentNode.name || currentNode.label;
+    const baseName = currentNode.qualified_name || currentNode.name || currentNode.label;
+    // file:name pins the exact definition when the name exists in several files
+    const symbolName = currentNode.file_path ? `${currentNode.file_path}:${baseName}` : baseName;
     const resp = await fetch(`${baseHost}/feature/${projectId}/impact/${encodeURIComponent(symbolName)}`);
     const data = await resp.json();
     
     // New API format: data.affected_functions_count, data.risk_level
     // Fallback to old format for compatibility
-    const riskLevel = data.risk_level || (data.technical_impact || {}).risk_level || 'unknown';
+    const riskLevel = (data.risk_level || (data.technical_impact || {}).risk_level || 'unknown').toLowerCase();
     const riskClass = riskLevel === 'high' ? 'impact-risk-high' : 
                       riskLevel === 'medium' ? 'impact-risk-medium' : 'impact-risk-low';
     
