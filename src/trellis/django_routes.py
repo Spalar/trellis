@@ -98,19 +98,19 @@ class _UrlConfEvaluator:
 
     def _exec(self, stmt: ast.stmt) -> None:
         if isinstance(stmt, ast.Assign):
-            value = self.eval(stmt.value)
+            value = self.evaluate(stmt.value)
             for target in stmt.targets:
                 self._bind(target, value)
         elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
-            self._bind(stmt.target, self.eval(stmt.value))
+            self._bind(stmt.target, self.evaluate(stmt.value))
         elif isinstance(stmt, ast.AugAssign) and isinstance(stmt.op, ast.Add):
             if isinstance(stmt.target, ast.Name):
                 current = self.env.get(stmt.target.id)
-                self.env[stmt.target.id] = self._add(current, self.eval(stmt.value))
+                self.env[stmt.target.id] = self._add(current, self.evaluate(stmt.value))
         elif isinstance(stmt, ast.Expr):
-            self.eval(stmt.value)
+            self.evaluate(stmt.value)
         elif isinstance(stmt, ast.For):
-            items = self.eval(stmt.iter)
+            items = self.evaluate(stmt.iter)
             if isinstance(items, (list, tuple)):
                 for item in items[:_MAX_LOOP]:
                     self._bind(stmt.target, item)
@@ -139,30 +139,30 @@ class _UrlConfEvaluator:
         # `urlpatterns += static(...)`: keep the routes we do know
         return list(left) if isinstance(left, (list, tuple)) else _UNKNOWN
 
-    def eval(self, node: ast.AST) -> object:
+    def evaluate(self, node: ast.AST) -> object:
         if isinstance(node, ast.Constant):
             return node.value
         if isinstance(node, ast.JoinedStr):
             parts = []
             for value in node.values:
-                part = self.eval(value.value if isinstance(value, ast.FormattedValue) else value)
+                part = self.evaluate(value.value if isinstance(value, ast.FormattedValue) else value)
                 parts.append(part if isinstance(part, (str, int)) else "*")
             return "".join(str(p) for p in parts)
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-            return self._add(self.eval(node.left), self.eval(node.right))
+            return self._add(self.evaluate(node.left), self.evaluate(node.right))
         if isinstance(node, (ast.List, ast.Tuple)):
-            items = [self.eval(e) for e in node.elts if not isinstance(e, ast.Starred)]
+            items = [self.evaluate(e) for e in node.elts if not isinstance(e, ast.Starred)]
             return items if isinstance(node, ast.List) else tuple(items)
         if isinstance(node, ast.Dict):
             return {
-                self.eval(k): self.eval(v)
+                self.evaluate(k): self.evaluate(v)
                 for k, v in zip(node.keys, node.values)
                 if k is not None
             }
         if isinstance(node, ast.Name):
             return self.env.get(node.id, Ref((node.id,)))
         if isinstance(node, ast.Attribute):
-            base = self.eval(node.value)
+            base = self.evaluate(node.value)
             if isinstance(base, Router) and node.attr == "urls":
                 return RouterUrls(base)
             if isinstance(base, Ref):
@@ -174,10 +174,10 @@ class _UrlConfEvaluator:
 
     def _call(self, node: ast.Call) -> object:
         func = node.func
-        args = [self.eval(a) for a in node.args]
-        kwargs = {k.arg: self.eval(k.value) for k in node.keywords if k.arg}
+        args = [self.evaluate(a) for a in node.args]
+        kwargs = {k.arg: self.evaluate(k.value) for k in node.keywords if k.arg}
         if isinstance(func, ast.Attribute):
-            owner = self.eval(func.value)
+            owner = self.evaluate(func.value)
             if func.attr == "as_view":
                 actions = args[0] if args and isinstance(args[0], dict) else None
                 return AsView(owner, actions)
