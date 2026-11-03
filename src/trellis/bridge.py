@@ -729,26 +729,38 @@ class CodeGraphBridge:
 
         At least one of query/node_type/returns/params is required upstream.
         """
-        args: Dict[str, Any] = {"limit": limit}
+        # With a query, the engine takes its top `limit` full-text hits and only
+        # then drops test symbols, so a small limit can come back empty
+        # (Django: query='apply_transition', limit=3 -> 0 results). Ask for a
+        # wider pool and cut it here.
+        args: Dict[str, Any] = {"limit": max(limit * 3, 30) if query else limit}
         if query:
             args["query"] = query
         if node_type:
-            args["node_type"] = node_type
+            args["type"] = node_type
         if returns:
             args["returns"] = returns
         if params:
             args["params"] = params
 
         result = self._call("ast_search", **args)
-        if isinstance(result, list):
-            return result
         if isinstance(result, dict):
             results = result.get("results")
-            if isinstance(results, list):
-                return results
             if results is None and result:
-                return [result]
-        return []
+                results = [result]
+            result = results
+        if not isinstance(result, list):
+            return []
+        if query:
+            # Exact name matches first; full-text rank can put the symbol
+            # itself below one that only mentions it.
+            q = query.lower()
+            result = sorted(
+                result,
+                key=lambda r: not isinstance(r, dict)
+                or q not in {str(r.get("name", "")).lower(), str(r.get("name", "")).lower().rsplit(".", 1)[-1]},
+            )
+        return result[:limit]
 
     def trace_http_route(
         self,
@@ -927,17 +939,42 @@ class CodeGraphBridge:
         if isinstance(result, dict) and "function" in result and "nodes" not in result:
             result["symbol"] = result["function"]
             result["nodes"] = [
-                {
-                    "name": n.get("name"),
-                    "location": {"file_path": n.get("file_path"), "start_line": n.get("start_line")},
-                    "kind": n.get("type"),
-                    "depth": n.get("depth"),
-                    "direction": n.get("direction"),
-                }
-                for key in ("callers", "callees")
-                for n in result.get(key) or []
+                node for key in ("callers", "callees") for node in self._call_graph_nodes(result.get(key), key)
             ]
         return result
+
+    @staticmethod
+    def _call_graph_nodes(entries: Any, direction: str) -> List[Dict[str, Any]]:
+        """Call-graph entries as {name, location, kind, depth, direction} nodes.
+
+        A dense graph comes back as file-level rollups ({"rollups": [{file,
+        names, node_ids, min_depth}]}) instead of a node list.
+        """
+        if isinstance(entries, dict):
+            return [
+                {
+                    "name": name,
+                    "node_id": node_id,
+                    "location": {"file_path": r.get("file"), "start_line": None},
+                    "kind": None,
+                    "depth": r.get("min_depth"),
+                    "direction": direction,
+                }
+                for r in entries.get("rollups") or []
+                if isinstance(r, dict)
+                for name, node_id in zip(r.get("names") or [], r.get("node_ids") or [])
+            ]
+        return [
+            {
+                "name": n.get("name"),
+                "location": {"file_path": n.get("file_path"), "start_line": n.get("start_line")},
+                "kind": n.get("type"),
+                "depth": n.get("depth"),
+                "direction": n.get("direction") or direction,
+            }
+            for n in entries or []
+            if isinstance(n, dict)
+        ]
 
     def get_ast_node(
         self, symbol: str, include_source: bool = True, file_path: str = None

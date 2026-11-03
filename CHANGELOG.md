@@ -98,6 +98,24 @@ Fork merge of 369 upstream commits. What changes for Trellis users:
   ran SQLite on the event loop; it now runs in a thread after the index
   freshness check, and skips by-name (`ambiguous`) edges.
 - `pyproject.toml` said version 0.3.0 while the release said 0.4.1.
+- **`trellis_ast_search` with a query and a small `limit` could return
+  nothing**: the engine takes its top `limit` full-text hits and only then
+  drops test symbols (Django project: `query='apply_transition', limit=3`
+  → 0 results). Trellis asks for a wider pool and cuts it, and an exact
+  name match comes first (it ranked second, below a function that calls
+  it). The node-type filter is sent as `type`, the engine's name for it.
+- `CodeGraphBridge.get_call_graph` crashed on a dense call graph, which the
+  engine returns as file-level rollups instead of a node list (Django
+  project: `apply_transition`, 268 nodes). Rollups are expanded into nodes.
+
+Checked against engine 0.184.0, with no change needed: the MCP tool list
+and CLI commands are the same as in 0.164.0; the `files` / `nodes` /
+`edges` tables Trellis reads and writes are unchanged; every engine call
+Trellis makes returns the shape it parses. Trellis's own call edges
+survive the engine's incremental re-index: after an edit to a file with
+283 Trellis edges into it, the engine keeps them, Trellis re-links the
+rest, and the result equals a fresh full sync (Python: 3,088 edges; JS
+augmentation: 247).
 
 ### Added
 - **`trellis_get_function` returns callers and callees** for functions and
@@ -166,7 +184,7 @@ leave out fields an agent does not use. The REST API is unchanged.
   (it never called Python's `eval`, but the security scan could not tell).
 - Tests run with a private `TRELLIS_DATA_DIR`; integration tests used to add
   project entries to the real `~/.trellis`. With a `tui-image-editor-fixture`
-  checkout present, all 213 tests pass on engine 0.184.0 (202 without it).
+  checkout present, all 215 tests pass on engine 0.184.0 (204 without it).
 
 ### Breaking changes (read before upgrading)
 1. **One-time full re-index** on first use of each project: the engine's

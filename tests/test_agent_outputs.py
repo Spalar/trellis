@@ -195,3 +195,28 @@ def test_named_caller_count_skips_tests_and_guesses(project):  # noqa: F811
     conn.commit()
     assert gq.named_caller_count(conn, "backend/services/billing.py", "charge", "function") == 1
     conn.close()
+
+
+def test_ast_search_widens_pool_and_puts_exact_name_first(monkeypatch):
+    sent = {}
+
+    def fake_call(tool, **args):
+        sent.update(args)
+        return {"results": [{"name": "follow_auto_chain"}, {"name": "Flow.apply_transition"}, {"name": "x"}]}
+
+    bridge = _cli_bridge(monkeypatch, {})
+    monkeypatch.setattr(bridge, "_call", fake_call, raising=False)
+    results = bridge.ast_search(query="apply_transition", node_type="function", limit=2)
+    assert sent["limit"] >= 30 and sent["type"] == "function" and "node_type" not in sent
+    assert [r["name"] for r in results] == ["Flow.apply_transition", "follow_auto_chain"]
+
+
+def test_call_graph_rollups_become_nodes():
+    rollup = {"rollups": [{"file": "a.py", "names": ["f", "g"], "node_ids": [1, 2], "min_depth": 1}], "total_count": 2}
+    nodes = CodeGraphBridge._call_graph_nodes(rollup, "callers")
+    assert [(n["name"], n["node_id"], n["location"]["file_path"], n["direction"]) for n in nodes] == [
+        ("f", 1, "a.py", "callers"),
+        ("g", 2, "a.py", "callers"),
+    ]
+    listed = CodeGraphBridge._call_graph_nodes([{"name": "h", "file_path": "b.py", "start_line": 3}], "callees")
+    assert listed[0]["location"] == {"file_path": "b.py", "start_line": 3} and listed[0]["direction"] == "callees"
