@@ -166,7 +166,7 @@ leave out fields an agent does not use. The REST API is unchanged.
   (it never called Python's `eval`, but the security scan could not tell).
 - Tests run with a private `TRELLIS_DATA_DIR`; integration tests used to add
   project entries to the real `~/.trellis`. With a `tui-image-editor-fixture`
-  checkout present, all 212 tests pass on engine 0.184.0 (200 without it).
+  checkout present, all 213 tests pass on engine 0.184.0 (202 without it).
 
 ### Breaking changes (read before upgrading)
 1. **One-time full re-index** on first use of each project: the engine's
