@@ -76,6 +76,7 @@ coverage.xml
 # PyInstaller
 *.manifest
 *.spec
+!trellis.spec
 
 # Django / Flask local stuff
 *.log

@@ -1,5 +1,5 @@
 # Trellis Core - Makefile
-.PHONY: install dev trellis-dev-vscode mcp-config run run-http run-api run-ui engine-release test lint format clean check
+.PHONY: install dev trellis-dev-vscode mcp-config run run-http run-api run-ui engine-release linux-release test lint format clean check
 
 PYTHON ?= python
 VENV := .venv
@@ -70,6 +70,12 @@ endif
 engine-release:
 	@echo "Building + publishing linux engine assets for the current version tag..."
 	$(PYTHON_VENV) scripts/build_engine_assets.py --publish
+
+# Linux amd64 + arm64 bundles (.tar.gz) and .deb packages into out/linux/,
+# install-tested on Debian 12 and Ubuntu 22.04/24.04. Needs Docker (Rancher
+# Desktop: set DOCKER_CONTEXT=default if the CLI points at another context).
+linux-release:
+	$(PYTHON_VENV) scripts/build_linux_release.py
 
 check:
 	curl -sSf http://localhost:17317/health -o nul 2>&1 || echo Health check failed

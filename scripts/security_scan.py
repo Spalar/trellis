@@ -274,6 +274,21 @@ class SecurityScanner:
             "maintainer; no HTTP request is made by Trellis",
         ),
         (
+            r"xdg-open http://127\.0\.0\.1:17317 ",
+            "Hardcoded HTTP(S) URL",
+            "Linux start-trellis.sh opens the user's browser on the local Trellis UI",
+        ),
+        (
+            r"^Homepage: https://github\.com/\{engine_assets\.REPO_SLUG\}$",
+            "Hardcoded HTTP(S) URL",
+            "Homepage field written into the .deb control file; no request is made",
+        ),
+        (
+            r"shutil\.rmtree\(STAGE_DIR\)",
+            "Python recursive delete",
+            "build_linux_release.py clears its own staging folder under out/linux/",
+        ),
+        (
             r"127\.0\.0\.1:17317/mcp",
             "Hardcoded HTTP(S) URL",
             "Loopback default URL emitted into user-generated MCP client configs; Trellis never requests it",

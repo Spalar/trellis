@@ -97,6 +97,11 @@ Fork merge of 369 upstream commits. What changes for Trellis users:
   substring match only when nothing matches (`match` says which). It also
   ran SQLite on the event loop; it now runs in a thread after the index
   freshness check, and skips by-name (`ambiguous`) edges.
+- **`trellis mcp` started the HTTP server in the bundled release** unless
+  the MCP client set `TRELLIS_TRANSPORT=stdio`, although its help and the
+  README say stdio. An agent configured with `command: trellis, args: [mcp]`
+  got no answers. `trellis mcp` is now stdio by default; the bare bundled
+  executable (no subcommand) still starts the HTTP app.
 - `pyproject.toml` said version 0.3.0 while the release said 0.4.1.
 - **`trellis_ast_search` with a query and a small `limit` could return
   nothing**: the engine takes its top `limit` full-text hits and only then
@@ -126,6 +131,20 @@ augmentation: 247).
   into test files are dropped: on the Django project, Django queryset calls
   `qs.first()` / `qs.exclude()` were bound by the engine to `SSETests.first`
   and `HistoricalLaneTests.exclude`.
+
+### Added — Linux packages
+- **Linux releases for amd64 and arm64**, as `.deb` packages
+  (`trellis_<version>_<arch>.deb`: installs `/opt/trellis`, puts `trellis` on
+  PATH, removes cleanly) and tarballs (`trellis-v<version>-linux-<arch>.tar.gz`:
+  unpack and run). Built by `scripts/build_linux_release.py`
+  (`make linux-release`) in Docker; arm64 builds under QEMU emulation.
+  Python dependencies are pinned to the versions the Windows build ships.
+- Every build installs each `.deb` on Debian 12, Ubuntu 22.04 and Ubuntu
+  24.04 as a non-root user, indexes a sample project, lists the MCP tools and
+  runs an impact analysis over stdio, then uninstalls; each tarball is run
+  the same way on Ubuntu 22.04. A failure stops the build.
+- Requires glibc 2.34+ (the engine's floor): Ubuntu 22.04+, Debian 12+,
+  RHEL 9+. No macOS build yet.
 
 ### Changed — smaller tool output
 MCP tools return one line per item instead of a JSON object per item, and
@@ -177,6 +196,10 @@ leave out fields an agent does not use. The REST API is unchanged.
   upstream CI ignores the same four). Upstream's developer kits (`tasks/`,
   `evals/`, Python under `scripts/`) are not scanned: they are run by hand
   and are not part of the crate. A test-only `mkfifo` call is allowlisted.
+- `trellis.spec` (the PyInstaller spec every release build uses) was
+  never committed: `.gitignore` excluded `*.spec`, so a fresh clone could
+  not build a release. It is tracked now, and builds a one-folder bundle on
+  Linux (the Windows output is unchanged).
 - `scripts/build_bridge.py` updates every version of a crate the lockfile
   holds more than once; `cargo update -p rand` used to fail and leave rand
   0.9.2 in the build.
@@ -184,7 +207,7 @@ leave out fields an agent does not use. The REST API is unchanged.
   (it never called Python's `eval`, but the security scan could not tell).
 - Tests run with a private `TRELLIS_DATA_DIR`; integration tests used to add
   project entries to the real `~/.trellis`. With a `tui-image-editor-fixture`
-  checkout present, all 215 tests pass on engine 0.184.0 (204 without it).
+  checkout present, all 216 tests pass on engine 0.184.0 (205 without it).
 
 ### Breaking changes (read before upgrading)
 1. **One-time full re-index** on first use of each project: the engine's
@@ -336,6 +359,11 @@ leave out fields an agent does not use. The REST API is unchanged.
 
 ### Artifacts
 - `out/trellis-v0.5.0-windows-amd64.zip` (engine 0.184.0 exe bundled inside).
+- `out/linux/`: `trellis_0.5.0_amd64.deb`, `trellis_0.5.0_arm64.deb`,
+  `trellis-v0.5.0-linux-amd64.tar.gz`, `trellis-v0.5.0-linux-arm64.tar.gz`,
+  `checksums.sha256`.
+- `out/engine/`: `code-graph-mcp-linux-amd64`, `code-graph-mcp-linux-arm64`,
+  `checksums.sha256` (engine 0.184.0, for downstream docker builds).
 
 ## v0.4.1 — 2026-10-11
 

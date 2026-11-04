@@ -7,17 +7,23 @@ Trellis is a dual-knowledge system that combines **code graph analysis** with **
 No Python, no terminal commands, no setup required.
 
 1. **Download** the latest release for your platform from GitHub Releases:
-   - `trellis-v0.2.0-windows-x86_64.zip`
-   - `trellis-v0.2.0-macos-arm64.zip`
-   - `trellis-v0.2.0-linux-x86_64.zip`
+   - Windows: `trellis-v<version>-windows-amd64.zip`
+   - Debian / Ubuntu: `trellis_<version>_amd64.deb` or `trellis_<version>_arm64.deb`
+   - Other Linux: `trellis-v<version>-linux-amd64.tar.gz` or `-linux-arm64.tar.gz`
 
-2. **Extract** the archive
+   Linux builds need glibc 2.34+ (Ubuntu 22.04+, Debian 12+, RHEL 9+). There is
+   no macOS build yet; run from source there.
 
-3. **Run the launcher:**
+2. **Install or extract**
+   - `.deb`: `sudo apt install ./trellis_<version>_amd64.deb` puts `trellis` on your PATH
+   - `.zip` / `.tar.gz`: extract anywhere
+
+3. **Run:**
    - Windows: double-click `start-trellis.bat`
-   - macOS/Linux: double-click or run `./start-trellis.sh`
+   - Linux: `trellis` (from the .deb) or `./start-trellis.sh` (from the tarball)
+   - For coding agents (MCP over stdio): `trellis mcp`
 
-4. **Done** — your browser opens to `http://localhost:17317`
+4. **Done** — open `http://localhost:17317`
 
 The server starts on `http://localhost:17317` with:
 - `/` — Web visualizer
@@ -171,6 +177,20 @@ close your MCP sessions first.
 
 This bundles Python, all dependencies, the `code-graph-mcp` binary, visualizer HTML, docs, and a launcher script. Users just extract and run.
 
+### Linux packages (amd64 and arm64)
+
+```bash
+python scripts/build_linux_release.py     # or: make linux-release
+```
+
+Builds in Docker (Rancher Desktop or Docker Desktop; arm64 runs under QEMU,
+registered automatically). Output in `out/linux/`: a `.tar.gz` and a `.deb`
+per architecture plus `checksums.sha256`. Each `.deb` is installed and tested
+on Debian 12, Ubuntu 22.04 and Ubuntu 24.04 (index a sample project, call MCP
+tools over stdio, uninstall) before the build counts as done. With Rancher
+Desktop and the Docker CLI on another context, run it with
+`DOCKER_CONTEXT=default`.
+
 ## Quick Start (After Server is Running)
 
 ### 1. Sync a Project
@@ -228,6 +248,7 @@ Open `http://localhost:17317` for the interactive visualizer:
 | `make run-http` | Start HTTP server on port 17317 |
 | `make mcp-config` | Interactive MCP client config generator (all providers) |
 | `make trellis-dev-vscode` | Print VS Code MCP configuration |
+| `make linux-release` | Linux amd64/arm64 .tar.gz and .deb into `out/linux/` |
 | `make test` | Run test suite |
 | `make lint` | Run ruff linter |
 | `make format` | Format code with ruff |

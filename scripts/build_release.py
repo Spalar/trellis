@@ -12,11 +12,12 @@ Release checklist (maintainer, Windows host):
     1. Bump VERSION in server.py.
     2. Add the release notes to CHANGELOG.md (new version heading).
     3. Run `python scripts/build_release.py` (optionally --deploy for dist/).
-    4. Run `make engine-release` — builds the linux/amd64 + linux/arm64
-       code-graph-mcp binaries in Docker and attaches them (plus
-       checksums.sha256) to the GitHub release for the version tag, for
-       downstream docker consumers.
-    5. Push the tag and commit; the GitHub release assets are already attached.
+    4. Run `python scripts/build_linux_release.py` — Linux amd64 + arm64
+       bundles (.tar.gz) and .deb packages in out/linux/, install-tested in
+       Docker; it also rebuilds the engine binaries in out/engine/.
+    5. Upload the Windows zip, out/linux/* and out/engine/* (engine binaries
+       for downstream docker consumers) to the release for the version tag.
+       `make engine-release` publishes out/engine/ with the gh CLI instead.
 
 Usage:
     python scripts/build_release.py          # build into out/
