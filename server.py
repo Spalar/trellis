@@ -278,7 +278,12 @@ def main() -> None:
     sub.add_parser("ui", help="Visualizer UI + API in one process")
     args = parser.parse_args(argv)
 
-    if args.command in (None, "mcp"):
+    if args.command == "mcp":
+        # `trellis mcp` is the agent entry point: stdio unless the caller asks
+        # for HTTP. Only the bare bundled exe defaults to the HTTP app.
+        os.environ.setdefault("TRELLIS_TRANSPORT", "stdio")
+        _run_mcp()
+    elif args.command is None:
         _run_mcp()
     elif args.command == "api":
         _run_api()

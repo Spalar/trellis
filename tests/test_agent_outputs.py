@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 import json
 import sqlite3
 
@@ -220,3 +222,20 @@ def test_call_graph_rollups_become_nodes():
     ]
     listed = CodeGraphBridge._call_graph_nodes([{"name": "h", "file_path": "b.py", "start_line": 3}], "callees")
     assert listed[0]["location"] == {"file_path": "b.py", "start_line": 3} and listed[0]["direction"] == "callees"
+
+
+def test_mcp_subcommand_defaults_to_stdio_in_bundle(monkeypatch):
+    """`trellis mcp` is stdio even though the bundle's launcher defaults to HTTP."""
+    import server
+
+    def run_mcp():
+        os.environ.setdefault("TRELLIS_TRANSPORT", "http")  # launcher.setup_environment
+        seen.append(os.environ["TRELLIS_TRANSPORT"])
+
+    seen = []
+    monkeypatch.setattr(server, "_run_mcp", run_mcp)
+    for argv, want in ((["trellis", "mcp"], "stdio"), (["trellis"], "http")):
+        monkeypatch.delenv("TRELLIS_TRANSPORT", raising=False)
+        monkeypatch.setattr(sys, "argv", argv)
+        server.main()
+        assert seen[-1] == want
